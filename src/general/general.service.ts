@@ -2,8 +2,8 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { Request as ExpressRequest } from 'express';
-import { UploadImageResult } from '../lib/cosService';
-import { CosService } from '../lib/cosService';
+import { BitifulService } from '../lib/bitifulService';
+import { UploadImageResult } from '../lib/bitifulService';
 import { VerificationService } from '../lib/verificationService';
 import * as dotenv from 'dotenv';
 import * as nodemailer from 'nodemailer';
@@ -21,7 +21,7 @@ export class GeneralService {
   private transporter: nodemailer.Transporter;
 
   constructor(
-    private readonly cosService: CosService,
+    private readonly bitifulService: BitifulService,
     private readonly verificationService: VerificationService,
   ) {
     this.transporter = nodemailer.createTransport({
@@ -182,7 +182,7 @@ export class GeneralService {
   }
 
   /**
-   * 上传图片到 COS。
+   * 上传图片到缤纷云对象存储。
    *
    * @param file 上传文件。
    * @returns 文件 URL 与 key。
@@ -214,7 +214,7 @@ export class GeneralService {
     }
 
     try {
-      const result: UploadImageResult = await this.cosService.uploadFile(file);
+      const result: UploadImageResult = await this.bitifulService.uploadFile(file);
       return { url: result.publicUrl, key: result.key };
     } catch (error) {
       throw new BadRequestException(

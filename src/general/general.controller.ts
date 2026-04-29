@@ -57,7 +57,7 @@ export class GeneralController {
   }
 
   /**
-   * 上传图片到 COS。
+   * 上传图片到缤纷云对象存储。
    *
    * @param file 上传文件。
    * @returns 文件 URL 与 key。
