@@ -7,7 +7,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { GeneralModule } from './general/general.module';
-import { LangchainModule } from './langchain/langchain.module';
+import { LangchainModule } from './agents/langchain/langchain.module';
 import { UserModule } from './user/user.module';
 
 @Module({
