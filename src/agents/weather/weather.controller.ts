@@ -25,20 +25,6 @@ export class WeatherController {
   }
 
   /**
-   * Queries weather from a natural language request.
-   *
-   * @param message Natural language weather request.
-   * @returns Weather agent response.
-   */
-  @Get('query')
-  async query(
-    @Query('message') message?: string,
-    @Query('conversationId') conversationId?: string,
-  ): Promise<WeatherAgentResponse> {
-    return this.weatherService.query(message ?? '', conversationId);
-  }
-
-  /**
    * Queries weather from a natural language request with conversation context.
    *
    * @param body Weather query request body.
