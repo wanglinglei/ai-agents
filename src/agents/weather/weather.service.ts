@@ -1,7 +1,11 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { ChatOpenAI } from '@langchain/openai';
 import { createAgent } from 'langchain';
-import { buildWeatherAgentSystemPrompt } from './prompts/weather-agent.prompt';
+import {
+  buildWeatherAgentSystemPrompt,
+  buildWeatherAnswerSystemPrompt,
+  buildWeatherClarificationSystemPrompt,
+} from './prompts/weather-agent.prompt';
 import { cityLookupTool } from './tools/city-lookup.tool';
 import { weatherTool } from './tools/weather.tool';
 import type { WeatherResult } from './tools/weather.tool';
@@ -12,6 +16,11 @@ export interface WeatherIntent {
   dateText: string;
 }
 
+export type WeatherAgentResponseStatus =
+  | 'failed'
+  | 'need_clarification'
+  | 'success';
+
 export interface WeatherAgentStatus {
   hasApiKey: boolean;
   integrated: boolean;
@@ -21,16 +30,32 @@ export interface WeatherAgentStatus {
 
 export interface WeatherAgentResponse {
   answer: string;
-  city: string;
-  date: string;
-  dateText: string;
-  intent: WeatherIntent;
+  city?: string;
+  date?: string;
+  dateText?: string;
+  intent?: WeatherIntent;
+  missingParams?: string[];
   model: string | null;
+  partialIntent?: Partial<WeatherIntent>;
   question: string;
-  weather: WeatherResult;
+  status: WeatherAgentResponseStatus;
+  weather?: WeatherResult;
 }
 
 type WeatherForecastDay = WeatherResult['forecast'][number];
+type WeatherAgentRunResult =
+  | {
+      action: 'answer';
+      answer: string;
+      intent: WeatherIntent;
+      weather: WeatherResult;
+    }
+  | {
+      action: 'clarify';
+      answer: string;
+      intent: Partial<WeatherIntent>;
+      missingParams: string[];
+    };
 
 /**
  * Checks whether a value is a plain object record.
@@ -52,6 +77,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function getStringValue(record: Record<string, unknown>, key: string): string {
   const value = record[key];
   return typeof value === 'string' ? value.trim() : '';
+}
+
+/**
+ * Reads a string array value from a record.
+ *
+ * @param record Source record.
+ * @param key Property name to read.
+ * @returns String array value, or an empty array.
+ */
+function getStringArrayValue(
+  record: Record<string, unknown>,
+  key: string,
+): string[] {
+  const value = record[key];
+
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter((item): item is string => typeof item === 'string');
 }
 
 /**
@@ -141,6 +186,20 @@ function getFinalAgentMessage(result: unknown): string {
 }
 
 /**
+ * Reads plain text content from a chat model result.
+ *
+ * @param result Chat model invoke result.
+ * @returns Plain text model output.
+ */
+function getChatModelMessage(result: unknown): string {
+  if (!isRecord(result)) {
+    return '';
+  }
+
+  return stringifyMessageContent(result.content).trim();
+}
+
+/**
  * Formats a date as a local YYYY-MM-DD string.
  *
  * @param date Date to format.
@@ -216,23 +275,63 @@ export class WeatherService {
       );
     }
 
-    const agentResult = await this.runWeatherAgent(message, apiKey);
-    const intent = agentResult.intent;
-    const weather = agentResult.weather;
-    const forecast = this.findForecastByDate(weather, intent.date);
+    try {
+      const agentResult = await this.runWeatherAgent(message, apiKey);
 
-    return {
-      answer:
-        agentResult.answer ||
-        this.buildFallbackAnswer(weather, intent, forecast),
-      city: intent.city,
-      date: intent.date,
-      dateText: intent.dateText,
-      intent,
-      model: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
-      question: message,
-      weather,
-    };
+      if (agentResult.action === 'clarify') {
+        const answer = await this.generateClarificationAnswer(
+          message,
+          apiKey,
+          agentResult.intent,
+          agentResult.missingParams,
+          agentResult.answer,
+        );
+
+        return {
+          answer,
+          city: agentResult.intent.city,
+          date: agentResult.intent.date,
+          dateText: agentResult.intent.dateText,
+          missingParams: agentResult.missingParams,
+          model: process.env.OPENAI_MODEL ?? 'qw-plus',
+          partialIntent: agentResult.intent,
+          question: message,
+          status: 'need_clarification',
+        };
+      }
+
+      const intent = agentResult.intent;
+      const weather = agentResult.weather;
+      const forecast = this.findForecastByDate(weather, intent.date);
+      const answer =
+        (await this.generateDemandAwareAnswer(
+          message,
+          apiKey,
+          intent,
+          weather,
+          forecast,
+          agentResult.answer,
+        )) || this.buildFallbackAnswer(weather, intent, forecast);
+
+      return {
+        answer,
+        city: intent.city,
+        date: intent.date,
+        dateText: intent.dateText,
+        intent,
+        model: process.env.OPENAI_MODEL ?? 'qw-plus',
+        question: message,
+        status: 'success',
+        weather,
+      };
+    } catch (error) {
+      return {
+        answer: this.buildApiFailureAnswer(message, error),
+        model: process.env.OPENAI_MODEL ?? 'qw-plus',
+        question: message,
+        status: 'failed',
+      };
+    }
   }
 
   /**
@@ -245,11 +344,7 @@ export class WeatherService {
   private async runWeatherAgent(
     message: string,
     apiKey: string,
-  ): Promise<{
-    answer: string;
-    intent: WeatherIntent;
-    weather: WeatherResult;
-  }> {
+  ): Promise<WeatherAgentRunResult> {
     const today = formatLocalDate(new Date());
     const agent = createAgent({
       model: new ChatOpenAI({
@@ -311,18 +406,50 @@ export class WeatherService {
   }
 
   /**
+   * Reads a partial weather intent from a clarification response.
+   *
+   * @param value Parsed model intent value.
+   * @returns Partial weather intent.
+   */
+  private validatePartialWeatherIntent(value: unknown): Partial<WeatherIntent> {
+    if (!isRecord(value)) {
+      return {};
+    }
+
+    const city = getStringValue(value, 'city');
+    const date = getStringValue(value, 'date');
+    const dateText = getStringValue(value, 'dateText');
+
+    return {
+      ...(city ? { city } : {}),
+      ...(date ? { date } : {}),
+      ...(dateText ? { dateText } : {}),
+    };
+  }
+
+  /**
    * Validates the structured weather agent response.
    *
    * @param value Parsed agent JSON value.
    * @returns Valid weather agent result.
    */
-  private validateWeatherAgentResult(value: unknown): {
-    answer: string;
-    intent: WeatherIntent;
-    weather: WeatherResult;
-  } {
+  private validateWeatherAgentResult(value: unknown): WeatherAgentRunResult {
     if (!isRecord(value)) {
       throw new BadRequestException('Weather agent result must be an object.');
+    }
+
+    const action = getStringValue(value, 'action');
+    const answer = getStringValue(value, 'answer');
+
+    if (action === 'clarify') {
+      const missingParams = getStringArrayValue(value, 'missingParams');
+
+      return {
+        action,
+        answer,
+        intent: this.validatePartialWeatherIntent(value.intent),
+        missingParams: missingParams.length ? missingParams : ['city'],
+      };
     }
 
     const intent = this.validateWeatherIntent(value.intent);
@@ -334,7 +461,8 @@ export class WeatherService {
     }
 
     return {
-      answer: getStringValue(value, 'answer'),
+      action: 'answer',
+      answer,
       intent,
       weather: value.weather as unknown as WeatherResult,
     };
@@ -355,7 +483,112 @@ export class WeatherService {
   }
 
   /**
-   * Builds a deterministic answer when OpenAI is not configured.
+   * Builds a stable fallback answer when the provider request fails.
+   *
+   * @param message Original user question.
+   * @param error Weather query error.
+   * @returns User-facing failure answer.
+   */
+  private buildApiFailureAnswer(message: string, error: unknown): string {
+    const reason = error instanceof Error ? error.message : '';
+    const normalizedReason = reason ? `（${reason}）` : '';
+
+    return `抱歉，刚才查询天气服务失败${normalizedReason}。你可以稍后再试，或换一个更明确的城市名称重新查询。原始问题：${message}`;
+  }
+
+  /**
+   * Generates a natural clarification answer from user demand and missing data.
+   *
+   * @param message Original user question.
+   * @param apiKey OpenAI compatible API key.
+   * @param intent Partially parsed weather intent.
+   * @param missingParams Missing weather query parameters.
+   * @param agentAnswer Clarification drafted by the tool-calling agent.
+   * @returns Natural clarification answer.
+   */
+  private async generateClarificationAnswer(
+    message: string,
+    apiKey: string,
+    intent: Partial<WeatherIntent>,
+    missingParams: string[],
+    agentAnswer: string,
+  ): Promise<string> {
+    const model = new ChatOpenAI({
+      apiKey,
+      model: process.env.OPENAI_MODEL,
+      temperature: 0.3,
+      configuration: {
+        baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      },
+    });
+    const result = await model.invoke([
+      {
+        content: buildWeatherClarificationSystemPrompt(),
+        role: 'system',
+      },
+      {
+        content: JSON.stringify({
+          agentAnswer,
+          intent,
+          missingParams,
+          userQuestion: message,
+        }),
+        role: 'user',
+      },
+    ]);
+
+    return getChatModelMessage(result) || agentAnswer;
+  }
+
+  /**
+   * Generates a demand-aware answer from the user request and weather data.
+   *
+   * @param message Original user question.
+   * @param apiKey OpenAI compatible API key.
+   * @param intent Parsed weather intent.
+   * @param weather Normalized weather result.
+   * @param forecast Forecast for the requested date.
+   * @param agentAnswer Answer drafted by the tool-calling agent.
+   * @returns Natural language answer tailored to the user's demand.
+   */
+  private async generateDemandAwareAnswer(
+    message: string,
+    apiKey: string,
+    intent: WeatherIntent,
+    weather: WeatherResult,
+    forecast: WeatherForecastDay | undefined,
+    agentAnswer: string,
+  ): Promise<string> {
+    const model = new ChatOpenAI({
+      apiKey,
+      model: process.env.OPENAI_MODEL,
+      temperature: 0.3,
+      configuration: {
+        baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      },
+    });
+    const result = await model.invoke([
+      {
+        content: buildWeatherAnswerSystemPrompt(),
+        role: 'system',
+      },
+      {
+        content: JSON.stringify({
+          agentAnswer,
+          forecast,
+          intent,
+          userQuestion: message,
+          weather,
+        }),
+        role: 'user',
+      },
+    ]);
+
+    return getChatModelMessage(result);
+  }
+
+  /**
+   * Builds a deterministic answer when the model answer is unavailable.
    *
    * @param weather Normalized weather result.
    * @param intent Parsed weather intent.
