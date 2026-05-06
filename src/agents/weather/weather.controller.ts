@@ -20,19 +20,15 @@ export class WeatherController {
   }
 
   /**
-   * Queries weather for a city or a natural language weather request.
+   * Queries weather from a natural language request.
    *
-   * @param city City name from query string.
-   * @param question Optional user weather question.
    * @param message Natural language weather request.
    * @returns Weather agent response.
    */
   @Get('query')
   async query(
-    @Query('city') city = '',
-    @Query('question') question?: string,
     @Query('message') message?: string,
   ): Promise<WeatherAgentResponse> {
-    return this.weatherService.query(city, question, message);
+    return this.weatherService.query(message ?? '');
   }
 }

@@ -155,33 +155,6 @@ function formatLocalDate(date: Date): string {
 }
 
 /**
- * Builds a natural language weather query from optional request fields.
- *
- * @param city Optional city query parameter.
- * @param question Optional user weather question.
- * @param message Optional natural language weather request.
- * @returns Normalized weather query text.
- */
-function buildWeatherQueryText(
-  city: string,
-  question?: string,
-  message?: string,
-): string {
-  const naturalLanguageRequest = message?.trim() || question?.trim();
-  const trimmedCity = city.trim();
-
-  if (naturalLanguageRequest) {
-    return naturalLanguageRequest;
-  }
-
-  if (trimmedCity) {
-    return `请查询${trimmedCity}今天的天气，并给出出行建议。`;
-  }
-
-  return '';
-}
-
-/**
  * Checks whether QWeather authentication is configured.
  *
  * @returns True when a supported QWeather token variable exists.
@@ -201,7 +174,7 @@ export class WeatherService {
     return {
       hasApiKey: Boolean(process.env.OPENAI_API_KEY),
       integrated: true,
-      model: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
+      model: process.env.OPENAI_MODEL || '',
       provider: 'QWeather',
     };
   }
@@ -209,17 +182,11 @@ export class WeatherService {
   /**
    * Queries weather data and generates a concise user-facing answer.
    *
-   * @param city City name from query string.
-   * @param question Optional user question about the weather.
-   * @param message Optional natural language weather request.
+   * @param message Natural language weather request.
    * @returns Weather data and generated answer.
    */
-  async query(
-    city: string,
-    question?: string,
-    message?: string,
-  ): Promise<WeatherAgentResponse> {
-    const normalizedQuestion = buildWeatherQueryText(city, question, message);
+  async query(message: string): Promise<WeatherAgentResponse> {
+    const normalizedQuestion = message.trim();
 
     if (!normalizedQuestion) {
       throw new BadRequestException('请提供天气查询内容。');
