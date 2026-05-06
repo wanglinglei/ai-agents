@@ -8,6 +8,7 @@ import { AppService } from './app.service';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { GeneralModule } from './general/general.module';
 import { LangchainModule } from './agents/langchain/langchain.module';
+import { WeatherModule } from './agents/weather/weather.module';
 import { UserModule } from './user/user.module';
 
 @Module({
@@ -27,6 +28,7 @@ import { UserModule } from './user/user.module';
     AlipayAuthModule,
     GeneralModule,
     LangchainModule,
+    WeatherModule,
   ],
   controllers: [AppController],
   providers: [
