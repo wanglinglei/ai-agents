@@ -1,9 +1,9 @@
-import { Body, Controller, Get, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Post } from '@nestjs/common';
 import { WeatherService } from './weather.service';
 import type {
   WeatherAgentResponse,
   WeatherAgentStatus,
-} from './weather.service';
+} from './types/weather-agent.types';
 
 export interface WeatherQueryBody {
   conversationId?: string;
