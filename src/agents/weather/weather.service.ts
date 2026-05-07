@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { ChatOpenAI } from '@langchain/openai';
 import { randomUUID } from 'node:crypto';
 import { createAgent } from 'langchain';
+import { AgentPersistenceService } from '../persistence/agent-persistence.service';
 import {
   buildWeatherAgentSystemPrompt,
   buildWeatherAnswerSystemPrompt,
@@ -40,14 +41,12 @@ import { validateWeatherAgentResult } from './utils/weather-agent-validators';
 
 const OPENAI_COMPATIBLE_BASE_URL =
   'https://dashscope.aliyuncs.com/compatible-mode/v1';
+const WEATHER_AGENT_KEY = 'weather';
 const WEATHER_CONVERSATION_TTL_MS = 10 * 60 * 1000;
 
 @Injectable()
 export class WeatherService {
-  private readonly conversations = new Map<
-    string,
-    WeatherConversationContext
-  >();
+  constructor(private readonly agentPersistence: AgentPersistenceService) {}
 
   /**
    * 返回天气 Agent 运行状态。
@@ -79,23 +78,30 @@ export class WeatherService {
    * @param conversationId 可选会话 ID。
    * @returns 存在且未过期的已存储上下文。
    */
-  private getConversationContext(
+  private async getConversationContext(
     conversationId?: string,
-  ): WeatherConversationContext | undefined {
+  ): Promise<WeatherConversationContext | undefined> {
     const normalizedConversationId = conversationId?.trim();
 
     if (!normalizedConversationId) {
       return undefined;
     }
 
-    const context = this.conversations.get(normalizedConversationId);
+    const context =
+      await this.agentPersistence.getConversationState<WeatherConversationContext>(
+        WEATHER_AGENT_KEY,
+        normalizedConversationId,
+      );
 
     if (!context) {
       return undefined;
     }
 
+    if (typeof context.updatedAt !== 'number') {
+      return undefined;
+    }
+
     if (Date.now() - context.updatedAt > WEATHER_CONVERSATION_TTL_MS) {
-      this.conversations.delete(normalizedConversationId);
       return undefined;
     }
 
@@ -108,14 +114,27 @@ export class WeatherService {
    * @param conversationId 要更新的会话 ID。
    * @param context 天气会话上下文。
    */
-  private saveConversationContext(
+  private async saveConversationContext(
     conversationId: string,
     context: Omit<WeatherConversationContext, 'updatedAt'>,
-  ): void {
-    this.conversations.set(conversationId, {
-      ...context,
-      updatedAt: Date.now(),
+  ): Promise<void> {
+    await this.agentPersistence.updateConversationState({
+      conversationId,
+      state: {
+        ...context,
+        updatedAt: Date.now(),
+      },
     });
+  }
+
+  /**
+   * 生成或复用天气查询会话 ID。
+   *
+   * @param conversationId 调用方传入的可选会话 ID。
+   * @returns 本次请求应使用的会话 ID。
+   */
+  resolveQueryConversationId(conversationId?: string): string {
+    return this.resolveConversationId(conversationId);
   }
 
   /**
@@ -196,7 +215,9 @@ export class WeatherService {
       throw new BadRequestException('请提供天气查询内容。');
     }
 
-    return this.queryByMessage(normalizedQuestion, conversationId);
+    const activeConversationId = this.resolveConversationId(conversationId);
+
+    return this.queryByMessage(normalizedQuestion, activeConversationId);
   }
 
   /**
@@ -207,13 +228,36 @@ export class WeatherService {
    */
   private async queryByMessage(
     message: string,
-    conversationId?: string,
+    conversationId: string,
   ): Promise<WeatherAgentResponse> {
-    const context = this.buildQueryExecutionContext(
+    await this.agentPersistence.ensureConversation({
+      agentKey: WEATHER_AGENT_KEY,
+      conversationId,
+      title: message.slice(0, 80),
+    });
+
+    const context = await this.buildQueryExecutionContext(
       message,
       conversationId,
       this.getRequiredOpenAIApiKey(),
     );
+    const userMessage = await this.agentPersistence.createMessage({
+      content: message,
+      conversationId,
+      role: 'user',
+    });
+    const run = await this.agentPersistence.createRun({
+      agentKey: WEATHER_AGENT_KEY,
+      conversationId,
+      input: {
+        agentMessage: context.agentMessage,
+        conversationContext: context.conversationContext,
+        message,
+      },
+      model: this.getResponseModelName(),
+      provider: 'QWeather',
+      userMessageId: userMessage.id,
+    });
 
     try {
       const agentResult = await this.runWeatherAgent(
@@ -222,21 +266,53 @@ export class WeatherService {
       );
 
       if (agentResult.action === 'clarify') {
-        return this.handleClarificationResult(message, context, agentResult);
+        const response = await this.handleClarificationResult(
+          message,
+          context,
+          agentResult,
+        );
+
+        await this.persistWeatherResponse(response, run.id);
+
+        return response;
       }
 
       if (agentResult.action === 'reuse') {
-        return this.handleReuseResult(message, context, agentResult);
+        const response = await this.handleReuseResult(
+          message,
+          context,
+          agentResult,
+        );
+
+        await this.persistWeatherResponse(response, run.id);
+
+        return response;
       }
 
-      return this.handleAnswerResult(message, context, agentResult);
+      const response = await this.handleAnswerResult(
+        message,
+        context,
+        agentResult,
+      );
+
+      await this.persistWeatherResponse(response, run.id);
+
+      return response;
     } catch (error) {
-      return buildFailedResponse({
+      const response = buildFailedResponse({
         answer: buildApiFailureAnswer(message, error),
-        conversationId: context.normalizedConversationId,
+        conversationId,
         message,
         model: this.getResponseModelName(),
       });
+
+      await this.persistWeatherResponse(response, run.id, false);
+      await this.agentPersistence.failRun({
+        error: this.serializeError(error),
+        runId: run.id,
+      });
+
+      return response;
     }
   }
 
@@ -271,13 +347,13 @@ export class WeatherService {
    * @param apiKey OpenAI 兼容 API Key。
    * @returns 准备好的查询执行上下文。
    */
-  private buildQueryExecutionContext(
+  private async buildQueryExecutionContext(
     message: string,
     conversationId: string | undefined,
     apiKey: string,
-  ): WeatherQueryExecutionContext {
+  ): Promise<WeatherQueryExecutionContext> {
     const normalizedConversationId = conversationId?.trim();
-    const conversationContext = this.getConversationContext(
+    const conversationContext = await this.getConversationContext(
       normalizedConversationId,
     );
     const agentMessage = this.buildContextualWeatherMessage(
@@ -352,7 +428,7 @@ export class WeatherService {
       agentResult.answer,
     );
 
-    this.saveConversationContext(activeConversationId, {
+    await this.saveConversationContext(activeConversationId, {
       lastDemand,
       lastIntent: context.conversationContext?.lastIntent,
       lastQuestion: context.conversationContext?.missingParams.length
@@ -403,7 +479,7 @@ export class WeatherService {
         agentResult.answer,
       )) || buildFallbackAnswer(weather, intent, forecast);
 
-    this.saveConversationContext(activeConversationId, {
+    await this.saveConversationContext(activeConversationId, {
       lastDemand,
       lastIntent: { ...intent, ...(lastDemand ? { demand: lastDemand } : {}) },
       lastQuestion: context.conversationContext?.missingParams.length
@@ -478,7 +554,7 @@ export class WeatherService {
         agentResult.answer,
       )) || buildFallbackAnswer(weather, normalizedIntent, forecast);
 
-    this.saveConversationContext(activeConversationId, {
+    await this.saveConversationContext(activeConversationId, {
       lastDemand,
       lastIntent: normalizedIntent,
       lastQuestion: message,
@@ -495,6 +571,113 @@ export class WeatherService {
       model: this.getResponseModelName(),
       weather,
     });
+  }
+
+  /**
+   * 保存天气响应对应的助手消息、天气产物和运行结果。
+   *
+   * @param response 天气 Agent 对外响应。
+   * @param runId 本次 Agent 运行 ID。
+   * @param completeRun 是否将运行标记为完成。
+   */
+  private async persistWeatherResponse(
+    response: WeatherAgentResponse,
+    runId: string,
+    completeRun = true,
+  ): Promise<void> {
+    if (!response.conversationId) {
+      return;
+    }
+
+    const assistantMessage = await this.agentPersistence.createMessage({
+      content: response.answer,
+      conversationId: response.conversationId,
+      metadata: {
+        city: response.city,
+        date: response.date,
+        dateText: response.dateText,
+        intent: response.intent,
+        missingParams: response.missingParams,
+        model: response.model,
+        partialIntent: response.partialIntent,
+        status: response.status,
+      },
+      role: 'assistant',
+      runId,
+      status: response.status === 'failed' ? 'failed' : 'completed',
+    });
+
+    const artifact = response.weather
+      ? await this.agentPersistence.createArtifact({
+          artifactType: 'weather_result',
+          conversationId: response.conversationId,
+          data: this.toJsonRecord(response.weather),
+          messageId: assistantMessage.id,
+          metadata: {
+            city: response.city,
+            date: response.date,
+            intent: response.intent,
+            source: response.weather.source,
+          },
+          runId,
+          title: `${response.city ?? '未知城市'}${response.dateText ?? ''}天气结果`,
+        })
+      : undefined;
+
+    if (artifact) {
+      await this.agentPersistence.updateMessage({
+        messageId: assistantMessage.id,
+        metadata: {
+          ...assistantMessage.metadata,
+          weatherArtifactId: artifact.id,
+        },
+      });
+    }
+
+    if (completeRun) {
+      await this.agentPersistence.completeRun({
+        assistantMessageId: assistantMessage.id,
+        output: {
+          answer: response.answer,
+          artifactId: artifact?.id,
+          intent: response.intent,
+          missingParams: response.missingParams,
+          partialIntent: response.partialIntent,
+          status: response.status,
+        },
+        runId,
+      });
+    }
+  }
+
+  /**
+   * 将未知错误转换为可安全写入 jsonb 的对象。
+   *
+   * @param error 捕获到的未知错误。
+   * @returns 标准化错误对象。
+   */
+  private serializeError(error: unknown): Record<string, unknown> {
+    if (error instanceof Error) {
+      return {
+        message: error.message,
+        name: error.name,
+        stack: error.stack,
+      };
+    }
+
+    return {
+      message: String(error),
+    };
+  }
+
+  /**
+   * 将结构化对象转换为普通 JSON 记录，便于写入 jsonb。
+   *
+   * @param value 要转换的值。
+   * @returns 可写入 jsonb 的普通对象。
+   */
+  private toJsonRecord(value: unknown): Record<string, unknown> {
+    return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
   }
 
   /**

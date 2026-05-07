@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Post,
+  Res,
+} from '@nestjs/common';
+import type { Response } from 'express';
 import { WeatherService } from './weather.service';
 import type {
   WeatherAgentResponse,
@@ -35,5 +43,65 @@ export class WeatherController {
     @Body() body: WeatherQueryBody,
   ): Promise<WeatherAgentResponse> {
     return this.weatherService.query(body.message ?? '', body.conversationId);
+  }
+
+  /**
+   * Streams only the weather answer text over a plain HTTP chunked response.
+   *
+   * @param body Weather query request body.
+   * @param response Express response used for chunked output.
+   */
+  @Post('query/stream')
+  async queryByStream(
+    @Body() body: WeatherQueryBody,
+    @Res() response: Response,
+  ): Promise<void> {
+    const message = body.message?.trim() ?? '';
+
+    if (!message) {
+      throw new BadRequestException('请提供天气查询内容。');
+    }
+
+    const conversationId = this.weatherService.resolveQueryConversationId(
+      body.conversationId,
+    );
+
+    response.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    response.setHeader('Cache-Control', 'no-cache, no-transform');
+    response.setHeader('X-Accel-Buffering', 'no');
+    response.setHeader('X-Conversation-Id', conversationId);
+    response.setHeader('Access-Control-Expose-Headers', 'X-Conversation-Id');
+
+    try {
+      const result = await this.weatherService.query(message, conversationId);
+      await this.writeAnswerStream(response, result.answer);
+    } catch (error) {
+      await this.writeAnswerStream(
+        response,
+        error instanceof Error ? error.message : '天气查询失败，请稍后再试。',
+      );
+    } finally {
+      response.end();
+    }
+  }
+
+  /**
+   * Writes answer text in small chunks so the frontend can render progressively.
+   *
+   * @param response Express response used for chunked output.
+   * @param answer Final answer text to stream.
+   */
+  private async writeAnswerStream(
+    response: Response,
+    answer: string,
+  ): Promise<void> {
+    const chunkSize = 8;
+
+    for (let index = 0; index < answer.length; index += chunkSize) {
+      response.write(answer.slice(index, index + chunkSize));
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+    }
   }
 }
