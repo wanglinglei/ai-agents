@@ -14,7 +14,7 @@
 
 - Node.js + TypeScript
 - NestJS 11
-- TypeORM + MySQL
+- TypeORM + PostgreSQL
 - JWT + Passport
 - LangChain / OpenAI 兼容接口
 - AWS S3 兼容对象存储（缤纷云）
@@ -36,9 +36,10 @@ NODE_ENV=development
 FRONTEND_ORIGIN=http://localhost:5173
 SESSION_SECRET=your-session-secret
 
-# MySQL
+# PostgreSQL
 DB_HOST=127.0.0.1
-DB_USERNAME=root
+DB_PORT=5432
+DB_USERNAME=postgres
 DB_PASSWORD=your_password
 DB_NAME=agents
 
@@ -185,6 +186,6 @@ src/
 ## 注意事项
 
 - TypeORM 当前开启了 `synchronize: true`，生产环境请谨慎使用。
-- MySQL 端口固定为 `3306`，数据库连接信息来自环境变量。
+- PostgreSQL 默认端口为 `5432`，可通过 `DB_PORT` 覆盖，数据库连接信息来自环境变量。
 - 默认会话 Cookie 名称为 `ai-service.sid`，验证码依赖服务端 session。
 - 部分三方能力依赖外部密钥，未配置时相关接口会返回配置缺失错误。
