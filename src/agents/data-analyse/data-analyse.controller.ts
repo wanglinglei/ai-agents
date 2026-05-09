@@ -9,7 +9,6 @@ import {
 import type { Response } from 'express';
 import { DataAnalyseService } from './data-analyse.service';
 import type {
-  DataAnalyseAgentResponse,
   DataAnalyseAgentStatus,
   DataAnalyseDbType,
   DataAnalyseQueryRequest,
@@ -51,19 +50,6 @@ export class DataAnalyseController {
   @Get('status')
   getStatus(): DataAnalyseAgentStatus {
     return this.dataAnalyseService.getStatus();
-  }
-
-  /**
-   * 执行数据分析查询。
-   *
-   * @param body 查询请求体。
-   * @returns 查询结果与分析回答。
-   */
-  @Post('query')
-  async queryByPost(
-    @Body() body: DataAnalyseQueryBody,
-  ): Promise<DataAnalyseAgentResponse> {
-    return this.dataAnalyseService.query(this.normalizeQueryBody(body));
   }
 
   /**

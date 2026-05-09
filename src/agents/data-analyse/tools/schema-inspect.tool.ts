@@ -1,10 +1,23 @@
 import { BadRequestException } from '@nestjs/common';
+import { tool, type DynamicStructuredTool } from '@langchain/core/tools';
 import type { DataSource } from 'typeorm';
 import type {
   DataAnalyseColumnSchema,
   DataAnalyseConnectionInput,
   DataAnalyseTableSchema,
 } from '../types/data-analyse-agent.types';
+
+const SCHEMA_INSPECT_TOOL_INPUT_SCHEMA = {
+  additionalProperties: false,
+  properties: {
+    table: {
+      description: '需要查询结构的目标表名，支持 schema.table 形式。',
+      type: 'string',
+    },
+  },
+  required: ['table'],
+  type: 'object',
+} as const;
 
 /**
  * 查询目标表结构并统一转换为标准格式。
@@ -44,6 +57,29 @@ export async function inspectTableSchema(
     dbType: connection.dbType,
     table: normalizedTable,
   };
+}
+
+/**
+ * 创建 LangChain 标准的表结构查询 Tool。
+ *
+ * @param dataSource 动态数据库连接。
+ * @param connection 连接信息。
+ * @returns 可供 LangChain Agent 调用的结构化 Tool。
+ */
+export function createSchemaInspectTool(
+  dataSource: DataSource,
+  connection: DataAnalyseConnectionInput,
+): DynamicStructuredTool {
+  return tool(
+    async (input: { table: string }): Promise<DataAnalyseTableSchema> =>
+      inspectTableSchema(dataSource, connection, input.table),
+    {
+      description:
+        '查询指定表的字段结构，返回字段名、类型、是否可空、默认值、主键信息等元数据。',
+      name: 'schema_inspect',
+      schema: SCHEMA_INSPECT_TOOL_INPUT_SCHEMA,
+    },
+  );
 }
 
 /**

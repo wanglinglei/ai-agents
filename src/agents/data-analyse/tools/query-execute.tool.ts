@@ -1,4 +1,17 @@
+import { tool, type DynamicStructuredTool } from '@langchain/core/tools';
 import type { DataSource } from 'typeorm';
+
+const QUERY_EXECUTE_TOOL_INPUT_SCHEMA = {
+  additionalProperties: false,
+  properties: {
+    sql: {
+      description: '需要执行的只读 SQL 语句。',
+      type: 'string',
+    },
+  },
+  required: ['sql'],
+  type: 'object',
+} as const;
 
 /**
  * SQL 执行结果。
@@ -28,6 +41,24 @@ export async function executeReadonlyQuery(
     rowCount: rows.length,
     rows,
   };
+}
+
+/**
+ * 创建 LangChain 标准的只读 SQL 执行 Tool。
+ *
+ * @param dataSource 已初始化的数据源。
+ * @returns 可供 LangChain Agent 调用的结构化 Tool。
+ */
+export function createQueryExecuteTool(dataSource: DataSource): DynamicStructuredTool {
+  return tool(
+    async (input: { sql: string }): Promise<QueryExecuteResult> =>
+      executeReadonlyQuery(dataSource, input.sql),
+    {
+      description: '执行只读 SQL 查询并返回结果行及行数统计。',
+      name: 'query_execute',
+      schema: QUERY_EXECUTE_TOOL_INPUT_SCHEMA,
+    },
+  );
 }
 
 /**

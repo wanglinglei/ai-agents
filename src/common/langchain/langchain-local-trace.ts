@@ -1,5 +1,6 @@
 import { BaseCallbackHandler } from '@langchain/core/callbacks/base';
 import type { RunnableConfig } from '@langchain/core/runnables';
+import chalk from 'chalk';
 
 const LANGCHAIN_LOCAL_TRACE_ENABLED_VALUE = 'true';
 
@@ -59,10 +60,12 @@ function createLocalTraceHandler(): BaseCallbackHandler {
 
   return BaseCallbackHandler.fromMethods({
     handleAgentAction(action) {
-      console.log(`[langchain:agent] Calling tool: ${action.tool}`);
+      console.log(
+        `${colorizeTag('agent')} Calling tool: ${String(action.tool)}`,
+      );
     },
     handleAgentEnd() {
-      console.log('[langchain:agent] Finished');
+      console.log(`${colorizeTag('agent')} Finished`);
     },
     handleChainStart(
       _chain,
@@ -74,11 +77,13 @@ function createLocalTraceHandler(): BaseCallbackHandler {
       runName,
     ) {
       chainRunStartAt.set(runId, Date.now());
-      console.log(`[langchain:chain] Start: ${runName || 'unnamed-chain'}`);
+      console.log(
+        `${colorizeTag('chain')} Start: ${runName || 'unnamed-chain'}`,
+      );
     },
     handleChainEnd(_outputs, runId) {
       const durationMs = getDurationMs(chainRunStartAt, runId);
-      console.log(`[langchain:chain] End${formatDuration(durationMs)}`);
+      console.log(`${colorizeTag('chain')} End${formatDuration(durationMs)}`);
     },
     handleLLMStart(
       _llm,
@@ -91,11 +96,15 @@ function createLocalTraceHandler(): BaseCallbackHandler {
       runName,
     ) {
       llmRunStartAt.set(runId, Date.now());
-      console.log(`[langchain:llm] Thinking... (${runName || 'chat-model'})`);
+      console.log(
+        `${colorizeTag('llm')} Thinking... (${runName || 'chat-model'})`,
+      );
     },
     handleLLMEnd(_output, runId) {
       const durationMs = getDurationMs(llmRunStartAt, runId);
-      console.log(`[langchain:llm] Completed${formatDuration(durationMs)}`);
+      console.log(
+        `${colorizeTag('llm')} Completed${formatDuration(durationMs)}`,
+      );
     },
     handleToolEnd(output, runId) {
       const toolState = toolRunState.get(runId);
@@ -106,7 +115,7 @@ function createLocalTraceHandler(): BaseCallbackHandler {
       );
       const toolName = toolState?.name || 'tool';
       console.log(
-        `[langchain:tool] End: ${toolName}${formatDuration(durationMs)} result=${stringifyToolResult(output)}`,
+        `${colorizeTag('tool')} End: ${toolName}${formatDuration(durationMs)} result=${stringifyToolResult(output)}`,
       );
     },
     handleToolStart(
@@ -115,17 +124,15 @@ function createLocalTraceHandler(): BaseCallbackHandler {
       runId,
       _parentRunId,
       _tags,
-      _metadata,
+      metadata,
       runName,
     ) {
-      const toolName = resolveToolName(tool, runName);
+      const toolName = resolveToolName(tool, runName, metadata);
       toolRunState.set(runId, {
         name: toolName,
         startAt: Date.now(),
       });
-      console.log(
-        `[langchain:tool] Start: ${toolName} input=${input}`,
-      );
+      console.log(`${colorizeTag('tool')} Start: ${toolName} input=${input}`);
     },
     handleToolError(error, runId) {
       const toolState = toolRunState.get(runId);
@@ -137,10 +144,33 @@ function createLocalTraceHandler(): BaseCallbackHandler {
       const toolName = toolState?.name || 'tool';
       const message = error instanceof Error ? error.message : String(error);
       console.log(
-        `[langchain:tool] Error: ${toolName}${formatDuration(durationMs)} message=${message}`,
+        `${colorizeTag('tool')} Error: ${toolName}${formatDuration(durationMs)} message=${message}`,
       );
     },
   });
+}
+
+/**
+ * 为不同 run 类型渲染彩色标签。
+ *
+ * @param type 日志分类。
+ * @returns 带 ANSI 颜色的标签文本。
+ */
+function colorizeTag(type: 'agent' | 'chain' | 'llm' | 'tool'): string {
+  const rawTag = `[langchain:${type}]`;
+  if (type === 'agent') {
+    return chalk.cyan(rawTag);
+  }
+
+  if (type === 'chain') {
+    return chalk.magenta(rawTag);
+  }
+
+  if (type === 'llm') {
+    return chalk.green(rawTag);
+  }
+
+  return chalk.yellow(rawTag);
 }
 
 /**
@@ -207,7 +237,11 @@ function getDurationMs(
  * @param runName 回调中的运行名称。
  * @returns 优先使用工具名，失败时回退到 runName。
  */
-function resolveToolName(tool: unknown, runName?: string): string {
+function resolveToolName(
+  tool: unknown,
+  runName?: string,
+  metadata?: unknown,
+): string {
   const isRecord = (value: unknown): value is Record<string, unknown> =>
     typeof value === 'object' && value !== null && !Array.isArray(value);
 
@@ -223,6 +257,13 @@ function resolveToolName(tool: unknown, runName?: string): string {
       if (typeof last === 'string' && last.trim()) {
         return last.trim();
       }
+    }
+  }
+
+  if (isRecord(metadata)) {
+    const metadataTool = metadata.tool;
+    if (typeof metadataTool === 'string' && metadataTool.trim()) {
+      return metadataTool.trim();
     }
   }
 
