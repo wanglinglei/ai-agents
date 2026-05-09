@@ -5,6 +5,10 @@
  * @FilePath: /agents/src/agents/weather/tools/city-lookup.tool.ts
  */
 import { DynamicTool } from '@langchain/core/tools';
+import {
+  getWeatherApiHost as getWeatherApiHostFromConfig,
+  getWeatherApiToken as getWeatherApiTokenFromConfig,
+} from '../../../common/config/runtime-env.config';
 
 export interface CityLookupToolInput {
   adm?: string;
@@ -144,7 +148,7 @@ function normalizeApiHost(host: string): string {
  * @returns QWeather JWT token.
  */
 function getWeatherApiToken(): string {
-  const token = process.env.WEATHER_API_TOKEN?.trim();
+  const token = getWeatherApiTokenFromConfig();
 
   if (!token) {
     throw new Error('QWeather token is required. Set WEATHER_API_TOKEN.');
@@ -188,7 +192,7 @@ function applyWeatherApiAuth(url: URL): Record<string, string> {
  * @returns QWeather API host.
  */
 function getWeatherApiHost(): string {
-  const apiHost = process.env.WEATHER_API_HOST?.trim();
+  const apiHost = getWeatherApiHostFromConfig();
 
   if (!apiHost) {
     throw new Error('QWeather API host is required. Set WEATHER_API_HOST.');

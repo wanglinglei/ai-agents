@@ -1,4 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
+import { hasWeatherApiToken } from '../../../common/config/runtime-env.config';
 
 /**
  * 判断传入值是否为普通对象记录。
@@ -165,5 +166,5 @@ export function formatLocalDate(date: Date): string {
  * @returns 存在可用和风天气 token 变量时返回 true。
  */
 export function hasQWeatherToken(): boolean {
-  return Boolean(process.env.WEATHER_API_TOKEN?.trim());
+  return hasWeatherApiToken();
 }

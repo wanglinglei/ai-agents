@@ -1,28 +1,18 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { ToolMessage } from '@langchain/core/messages';
-import { ChatOpenAI } from '@langchain/openai';
 import { randomUUID } from 'node:crypto';
-import { DataSource } from 'typeorm';
-import {
-  createLangChainLocalTraceConfig,
-  isLangChainLocalTraceEnabled,
-} from '../../common/langchain/langchain-local-trace';
+import type { DataSource } from 'typeorm';
+import { AGENT_MESSAGE_ROLE } from '../../common/agents';
+import { isLangChainLocalTraceEnabled } from '../../common/langchain/langchain-local-trace';
+import { hasOpenAIApiKey } from '../../common/config/runtime-env.config';
 import { AgentPersistenceService } from '../persistence/agent-persistence.service';
-import {
-  buildDataAnalyseAnswerPrompt,
-  buildDataAnalysePlannerPrompt,
-} from './prompts/data-analyse-agent.prompt';
-import {
-  createQueryExecuteTool,
-  type QueryExecuteResult,
-} from './tools/query-execute.tool';
-import { createSchemaInspectTool } from './tools/schema-inspect.tool';
+import { DataAnalyseExecutionService } from './data-analyse-execution.service';
+import { DataAnalyseModelService } from './data-analyse-model.service';
+import { DataAnalyseResponseService } from './data-analyse-response.service';
 import type {
   DataAnalyseAgentResponse,
   DataAnalyseAgentStatus,
   DataAnalyseConnectionInput,
   DataAnalyseQueryRequest,
-  DataAnalyseTableSchema,
 } from './types/data-analyse-agent.types';
 import {
   buildApiFailureAnswer,
@@ -31,10 +21,7 @@ import {
 } from './utils/data-analyse-responses';
 
 const DATA_ANALYSE_AGENT_KEY = 'data_analyse';
-const OPENAI_COMPATIBLE_BASE_URL = process.env.OPENAI_COMPATIBLE_BASE_URL;
-const RESPONSE_ROWS_LIMIT = 1000;
 const RESPONSE_ROWS_PREVIEW_LIMIT = 20;
-const ANSWER_ROWS_LIMIT = 50;
 type DataAnalyseAnswerChunkHandler = (chunk: string) => void | Promise<void>;
 type DataAnalyseStreamMetadata = {
   rowCount?: number;
@@ -44,23 +31,15 @@ type DataAnalyseStreamMetadata = {
 type DataAnalyseStreamMetadataHandler = (
   metadata: DataAnalyseStreamMetadata,
 ) => void;
-type DataAnalyseToolExecutionResult = {
-  intent: string;
-  queryResult: QueryExecuteResult;
-  schema: DataAnalyseTableSchema;
-  sql: string;
-};
-type DataAnalyseRuntimeTool = {
-  invoke: (
-    input: Record<string, unknown>,
-    config?: ReturnType<typeof createLangChainLocalTraceConfig>,
-  ) => Promise<unknown>;
-  name: string;
-};
 
 @Injectable()
 export class DataAnalyseService {
-  constructor(private readonly agentPersistence: AgentPersistenceService) {}
+  constructor(
+    private readonly agentPersistence: AgentPersistenceService,
+    private readonly executionService: DataAnalyseExecutionService,
+    private readonly modelService: DataAnalyseModelService,
+    private readonly responseService: DataAnalyseResponseService,
+  ) {}
 
   /**
    * 返回 data-analyse agent 运行状态。
@@ -69,10 +48,10 @@ export class DataAnalyseService {
    */
   getStatus(): DataAnalyseAgentStatus {
     return {
-      hasApiKey: Boolean(process.env.OPENAI_API_KEY),
+      hasApiKey: hasOpenAIApiKey(),
       integrated: true,
       localTrace: isLangChainLocalTraceEnabled(),
-      model: this.getResponseModelName(),
+      model: this.modelService.getResponseModelName(),
       provider: 'OpenAICompatible',
       supportedDbTypes: ['mysql', 'postgres'],
     };
@@ -133,8 +112,8 @@ export class DataAnalyseService {
       throw new BadRequestException('请提供目标表名。');
     }
 
-    const apiKey = this.ensureApiKey();
-    const modelName = this.getResponseModelName();
+    const apiKey = this.modelService.ensureApiKey();
+    const modelName = this.modelService.getResponseModelName();
 
     await this.agentPersistence.ensureConversation({
       agentKey: DATA_ANALYSE_AGENT_KEY,
@@ -151,17 +130,17 @@ export class DataAnalyseService {
     const userMessage = await this.agentPersistence.createMessage({
       content: normalizedMessage,
       conversationId: normalizedConversationId,
-      metadata: this.toJsonRecord({
+      metadata: this.modelService.toJsonRecord({
         connection: this.buildSafeConnectionSnapshot(connection),
         table,
       }),
-      role: 'user',
+      role: AGENT_MESSAGE_ROLE.USER,
     });
 
     const run = await this.agentPersistence.createRun({
       agentKey: DATA_ANALYSE_AGENT_KEY,
       conversationId: normalizedConversationId,
-      input: this.toJsonRecord({
+      input: this.modelService.toJsonRecord({
         connection: this.buildSafeConnectionSnapshot(connection),
         question: normalizedMessage,
         table,
@@ -174,14 +153,16 @@ export class DataAnalyseService {
     let dataSource: DataSource | null = null;
 
     try {
-      dataSource = await this.createAndInitializeDataSource(connection);
-      const executionResult = await this.executeWithToolCalling({
-        apiKey,
-        connection,
-        dataSource,
-        message: normalizedMessage,
-        table,
-      });
+      dataSource =
+        await this.executionService.createAndInitializeDataSource(connection);
+      const executionResult =
+        await this.executionService.executeWithToolCalling({
+          apiKey,
+          connection,
+          dataSource,
+          message: normalizedMessage,
+          table,
+        });
       const { intent, queryResult, schema, sql: safeSql } = executionResult;
 
       if (onMetadata) {
@@ -193,23 +174,23 @@ export class DataAnalyseService {
       }
 
       const answer = onAnswerChunk
-        ? await this.generateAnswerStream(
+        ? await this.responseService.generateAnswerStream({
             apiKey,
-            normalizedMessage,
             intent,
-            safeSql,
-            queryResult.rows,
-            onAnswerChunk,
+            onChunk: onAnswerChunk,
+            question: normalizedMessage,
+            rows: queryResult.rows,
             schema,
-          )
-        : await this.generateAnswer(
+            sql: safeSql,
+          })
+        : await this.responseService.generateAnswer({
             apiKey,
-            normalizedMessage,
             intent,
-            safeSql,
-            queryResult.rows,
+            question: normalizedMessage,
+            rows: queryResult.rows,
             schema,
-          );
+            sql: safeSql,
+          });
 
       const successResponse = buildSuccessResponse({
         answer,
@@ -222,7 +203,7 @@ export class DataAnalyseService {
         sql: safeSql,
       });
 
-      await this.persistResponse({
+      await this.responseService.persistResponse({
         conversationId: normalizedConversationId,
         response: successResponse,
         runId: run.id,
@@ -249,7 +230,7 @@ export class DataAnalyseService {
         await onAnswerChunk(failedResponse.answer);
       }
 
-      await this.persistFailedResponse(
+      await this.responseService.persistFailedResponse(
         normalizedConversationId,
         run.id,
         failedResponse,
@@ -257,7 +238,7 @@ export class DataAnalyseService {
 
       return failedResponse;
     } finally {
-      await this.destroyDataSource(dataSource);
+      await this.executionService.destroyDataSource(dataSource);
     }
   }
 
@@ -303,941 +284,6 @@ export class DataAnalyseService {
     }
 
     return normalized;
-  }
-
-  /**
-   * 创建并初始化动态数据源。
-   *
-   * @param connection 数据库连接参数。
-   * @returns 可执行查询的数据源。
-   */
-  private async createAndInitializeDataSource(
-    connection: DataAnalyseConnectionInput,
-  ): Promise<DataSource> {
-    const dataSource = new DataSource({
-      database: connection.database,
-      host: connection.host,
-      logging: false,
-      password: connection.password,
-      port: connection.port,
-      synchronize: false,
-      type: connection.dbType,
-      username: connection.username,
-    });
-
-    return dataSource.initialize();
-  }
-
-  /**
-   * 销毁动态数据源，避免连接泄漏。
-   *
-   * @param dataSource 动态数据源。
-   */
-  private async destroyDataSource(
-    dataSource: DataSource | null,
-  ): Promise<void> {
-    if (!dataSource?.isInitialized) {
-      return;
-    }
-
-    await dataSource.destroy();
-  }
-
-  /**
-   * 构建“全字段取数”分析 SQL。
-   *
-   * @param dbType 数据库类型。
-   * @param table 表名。
-   * @returns 默认分析 SQL。
-   */
-  private buildDefaultAnalysisSql(
-    dbType: DataAnalyseConnectionInput['dbType'],
-    table: string,
-  ): string {
-    const safeTable = this.escapeTableIdentifier(dbType, table);
-    return `SELECT * FROM ${safeTable} LIMIT ${RESPONSE_ROWS_LIMIT}`;
-  }
-
-  /**
-   * 使用 LangChain tool-calling 执行“查结构 + 跑查询”流程。
-   *
-   * @param input 执行所需上下文。
-   * @returns 结构、SQL、查询结果和意图。
-   */
-  private async executeWithToolCalling(input: {
-    apiKey: string;
-    connection: DataAnalyseConnectionInput;
-    dataSource: DataSource;
-    message: string;
-    table: string;
-  }): Promise<DataAnalyseToolExecutionResult> {
-    const schemaInspectTool = createSchemaInspectTool(
-      input.dataSource,
-      input.connection,
-    ) as unknown as DataAnalyseRuntimeTool;
-    const queryExecuteTool = createQueryExecuteTool(
-      input.dataSource,
-    ) as unknown as DataAnalyseRuntimeTool;
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
-    const plannerModel = this.createChatModel(input.apiKey, 0).bindTools([
-      schemaInspectTool,
-      queryExecuteTool,
-    ]);
-    const plannerPrompt = [
-      buildDataAnalysePlannerPrompt(input.connection.dbType),
-      '你必须优先调用 schema_inspect，再根据结构调用 query_execute。',
-      `目标表固定为：${input.table}，不要改成其他表。`,
-      'query_execute 的 sql 必须是只读查询，不允许任何写入或 DDL 语句。',
-      `最终 SQL 必须限制返回行数，LIMIT 不得超过 ${RESPONSE_ROWS_LIMIT}。`,
-      '完成工具调用后，仅输出 JSON，至少包含 action 与 intent 字段。',
-    ].join('\n');
-    const messages: Array<
-      | { content: string; role: 'system' | 'user' }
-      | ToolMessage
-      | Awaited<ReturnType<typeof plannerModel.invoke>>
-    > = [
-      {
-        content: plannerPrompt,
-        role: 'system',
-      },
-      {
-        content: JSON.stringify(
-          {
-            question: input.message,
-            table: input.table,
-          },
-          null,
-          2,
-        ),
-        role: 'user',
-      },
-    ];
-
-    let latestSchema: DataAnalyseTableSchema | null = null;
-    let latestQueryResult: QueryExecuteResult | null = null;
-    let latestSql: string | null = null;
-    let plannerIntent = `基于 ${input.table} 的数据分析：${input.message}`;
-
-    for (let step = 0; step < 6; step += 1) {
-      const aiMessage = await plannerModel.invoke(
-        messages,
-        this.createDebugRunConfig('data-analyse.plan.tool-calling', {
-          step: step + 1,
-        }),
-      );
-      messages.push(aiMessage);
-      plannerIntent = this.extractPlannerIntent(
-        aiMessage.content,
-        plannerIntent,
-      );
-      const toolCalls = Array.isArray(aiMessage.tool_calls)
-        ? aiMessage.tool_calls
-        : [];
-
-      if (!toolCalls.length) {
-        break;
-      }
-
-      for (const toolCall of toolCalls) {
-        const toolCallId = toolCall.id ?? randomUUID();
-        const tool = this.resolveDataAnalyseTool(
-          toolCall.name,
-          schemaInspectTool,
-          queryExecuteTool,
-        );
-
-        if (!tool) {
-          messages.push(
-            new ToolMessage({
-              content: JSON.stringify({
-                error: `未知工具：${toolCall.name}`,
-              }),
-              status: 'error',
-              tool_call_id: toolCallId,
-            }),
-          );
-          continue;
-        }
-
-        const normalizedToolArgs = this.normalizeToolArgsForExecution(
-          toolCall.name,
-          toolCall.args,
-        );
-        const toolOutput = await this.invokeDataAnalyseTool(
-          tool,
-          normalizedToolArgs,
-          'data-analyse.tool.execute',
-          {
-            step: step + 1,
-            tool: toolCall.name,
-          },
-        );
-
-        if (toolCall.name === 'schema_inspect') {
-          const schema = this.parseSchemaToolOutput(toolOutput);
-          latestSchema = schema;
-          messages.push(
-            new ToolMessage({
-              content: JSON.stringify(schema),
-              tool_call_id: toolCallId,
-            }),
-          );
-          continue;
-        }
-
-        if (toolCall.name === 'query_execute') {
-          const queryResult = this.parseQueryToolOutput(toolOutput);
-          latestQueryResult = queryResult;
-          latestSql =
-            typeof normalizedToolArgs.sql === 'string'
-              ? normalizedToolArgs.sql
-              : latestSql;
-          messages.push(
-            new ToolMessage({
-              content: JSON.stringify({
-                rowCount: queryResult.rowCount,
-                rows: queryResult.rows.slice(0, RESPONSE_ROWS_PREVIEW_LIMIT),
-              }),
-              tool_call_id: toolCallId,
-            }),
-          );
-          continue;
-        }
-
-        messages.push(
-          new ToolMessage({
-            content: JSON.stringify({
-              error: `未知工具：${toolCall.name}`,
-            }),
-            status: 'error',
-            tool_call_id: toolCallId,
-          }),
-        );
-      }
-    }
-
-    if (!latestSchema) {
-      const fallbackSchema = await this.invokeDataAnalyseTool(
-        schemaInspectTool,
-        {
-          table: input.table,
-        },
-        'data-analyse.tool.fallback.schema',
-        {
-          reason: 'missing_schema',
-        },
-      );
-      latestSchema = this.parseSchemaToolOutput(fallbackSchema);
-    }
-
-    if (!latestSql || !latestQueryResult) {
-      latestSql = this.buildDefaultAnalysisSql(
-        input.connection.dbType,
-        latestSchema.table,
-      );
-      const fallbackResult = await this.invokeDataAnalyseTool(
-        queryExecuteTool,
-        {
-          sql: latestSql,
-        },
-        'data-analyse.tool.fallback.query',
-        {
-          reason: 'missing_result',
-        },
-      );
-      latestQueryResult = this.parseQueryToolOutput(fallbackResult);
-    }
-
-    return {
-      intent: plannerIntent,
-      queryResult: latestQueryResult,
-      schema: latestSchema,
-      sql: latestSql,
-    };
-  }
-
-  /**
-   * 从 tool 参数中提取 SQL 文本。
-   *
-   * @param args 工具调用参数。
-   * @returns SQL 文本。
-   */
-  private extractSqlFromToolArgs(args: unknown): string {
-    if (
-      typeof args === 'object' &&
-      args !== null &&
-      'sql' in args &&
-      typeof args.sql === 'string'
-    ) {
-      return args.sql;
-    }
-
-    throw new BadRequestException('query_execute 缺少 sql 参数。');
-  }
-
-  /**
-   * 从 tool 参数中提取表名。
-   *
-   * @param args 工具调用参数。
-   * @returns 目标表名。
-   */
-  private extractTableFromToolArgs(args: unknown): string {
-    if (
-      typeof args === 'object' &&
-      args !== null &&
-      'table' in args &&
-      typeof args.table === 'string'
-    ) {
-      return args.table;
-    }
-
-    throw new BadRequestException('schema_inspect 缺少 table 参数。');
-  }
-
-  /**
-   * 解析并验证 schema tool 返回结构。
-   *
-   * @param output tool 原始输出。
-   * @returns 结构化表结构。
-   */
-  private parseSchemaToolOutput(output: unknown): DataAnalyseTableSchema {
-    if (!this.isRecord(output)) {
-      throw new BadRequestException('schema_inspect 返回结果格式错误。');
-    }
-
-    if (
-      typeof output.database !== 'string' ||
-      typeof output.table !== 'string' ||
-      (output.dbType !== 'mysql' && output.dbType !== 'postgres') ||
-      !Array.isArray(output.columns)
-    ) {
-      throw new BadRequestException('schema_inspect 返回字段缺失。');
-    }
-    const parsedColumns = output.columns
-      .filter((column): column is Record<string, unknown> =>
-        this.isRecord(column),
-      )
-      .map((column) => ({
-        defaultValue:
-          column.defaultValue === null ||
-          column.defaultValue === undefined ||
-          typeof column.defaultValue === 'string'
-            ? (column.defaultValue ?? null)
-            : typeof column.defaultValue === 'number' ||
-                typeof column.defaultValue === 'boolean' ||
-                typeof column.defaultValue === 'bigint'
-              ? `${column.defaultValue}`
-              : JSON.stringify(column.defaultValue),
-        name: typeof column.name === 'string' ? column.name : '',
-        nullable: Boolean(column.nullable),
-        ordinalPosition: Number(column.ordinalPosition ?? 0),
-        primaryKey: Boolean(column.primaryKey),
-        type: typeof column.type === 'string' ? column.type : '',
-      }));
-
-    if (
-      parsedColumns.length !== output.columns.length ||
-      parsedColumns.some((column) => !column.name || !column.type)
-    ) {
-      throw new BadRequestException('schema_inspect 返回字段结构非法。');
-    }
-
-    return {
-      columns: parsedColumns,
-      database: output.database,
-      dbType: output.dbType,
-      table: output.table,
-    };
-  }
-
-  /**
-   * 解析并验证 query tool 返回结构。
-   *
-   * @param output tool 原始输出。
-   * @returns 查询结果对象。
-   */
-  private parseQueryToolOutput(output: unknown): QueryExecuteResult {
-    if (!this.isRecord(output)) {
-      throw new BadRequestException('query_execute 返回结果格式错误。');
-    }
-
-    if (!Array.isArray(output.rows) || typeof output.rowCount !== 'number') {
-      throw new BadRequestException('query_execute 返回字段缺失。');
-    }
-    const rows = output.rows.filter((row): row is Record<string, unknown> =>
-      this.isRecord(row),
-    );
-
-    if (rows.length !== output.rows.length) {
-      throw new BadRequestException('query_execute rows 数据结构非法。');
-    }
-
-    return {
-      rowCount: output.rowCount,
-      rows,
-    };
-  }
-
-  /**
-   * 为工具执行准备参数并注入安全规则。
-   *
-   * @param toolName 工具名称。
-   * @param args 模型提供的参数。
-   * @returns 可执行工具参数。
-   */
-  private normalizeToolArgsForExecution(
-    toolName: string,
-    args: unknown,
-  ): Record<string, unknown> {
-    if (toolName === 'schema_inspect') {
-      return {
-        table: this.extractTableFromToolArgs(args),
-      };
-    }
-
-    if (toolName === 'query_execute') {
-      const sql = this.normalizeReadonlySql(this.extractSqlFromToolArgs(args));
-      return { sql };
-    }
-
-    if (this.isRecord(args)) {
-      return args;
-    }
-
-    return {};
-  }
-
-  /**
-   * 根据名称解析数据分析工具实例。
-   *
-   * @param toolName 工具名。
-   * @param schemaInspectTool 结构查询工具。
-   * @param queryExecuteTool SQL 执行工具。
-   * @returns 命中的工具或 null。
-   */
-  private resolveDataAnalyseTool(
-    toolName: string,
-    schemaInspectTool: DataAnalyseRuntimeTool,
-    queryExecuteTool: DataAnalyseRuntimeTool,
-  ): DataAnalyseRuntimeTool | null {
-    if (toolName === schemaInspectTool.name) {
-      return schemaInspectTool;
-    }
-
-    if (toolName === queryExecuteTool.name) {
-      return queryExecuteTool;
-    }
-
-    return null;
-  }
-
-  /**
-   * 通过统一入口执行 Tool，便于注入调试配置。
-   *
-   * @param tool 目标工具实例。
-   * @param input 工具输入参数。
-   * @param runName trace 运行名。
-   * @param metadata trace 元数据。
-   * @returns 工具执行输出。
-   */
-  private async invokeDataAnalyseTool(
-    tool: DataAnalyseRuntimeTool,
-    input: Record<string, unknown>,
-    runName: string,
-    metadata: Record<string, unknown>,
-  ): Promise<unknown> {
-    return tool.invoke(input, this.createDebugRunConfig(runName, metadata));
-  }
-
-  /**
-   * 校验并规范化只读 SQL，限制模型执行风险。
-   *
-   * @param sql 原始 SQL。
-   * @returns 安全 SQL。
-   */
-  private normalizeReadonlySql(sql: string): string {
-    const normalizedSql = sql.trim().replace(/;+\s*$/g, '');
-    const blockedKeywordPattern =
-      /\b(ALTER|CREATE|DELETE|DROP|GRANT|INSERT|MERGE|REPLACE|REVOKE|TRUNCATE|UPDATE)\b/i;
-
-    if (!normalizedSql) {
-      throw new BadRequestException('SQL 不能为空。');
-    }
-
-    if (normalizedSql.includes(';')) {
-      throw new BadRequestException('仅支持单条 SQL 查询。');
-    }
-
-    if (!/^(SELECT|WITH)\b/i.test(normalizedSql)) {
-      throw new BadRequestException('仅支持 SELECT/WITH 查询。');
-    }
-
-    if (blockedKeywordPattern.test(normalizedSql)) {
-      throw new BadRequestException('SQL 包含不允许的写操作或 DDL 关键字。');
-    }
-
-    const limitMatch = normalizedSql.match(/\bLIMIT\s+(\d+)\b/i);
-    if (!limitMatch) {
-      return `${normalizedSql} LIMIT ${RESPONSE_ROWS_LIMIT}`;
-    }
-
-    const limitValue = Number(limitMatch[1]);
-    if (!Number.isFinite(limitValue) || limitValue <= 0) {
-      throw new BadRequestException('SQL LIMIT 值不合法。');
-    }
-
-    if (limitValue > RESPONSE_ROWS_LIMIT) {
-      throw new BadRequestException(
-        `SQL LIMIT 不能超过 ${RESPONSE_ROWS_LIMIT}。`,
-      );
-    }
-
-    return normalizedSql;
-  }
-
-  /**
-   * 从规划模型输出中提取意图字段。
-   *
-   * @param content 模型 content。
-   * @param fallback 无法解析时的回退意图。
-   * @returns 当前可用意图。
-   */
-  private extractPlannerIntent(content: unknown, fallback: string): string {
-    const text = this.stringifyMessageContent(content).trim();
-    if (!text) {
-      return fallback;
-    }
-
-    try {
-      const parsed: unknown = JSON.parse(text);
-      if (
-        typeof parsed === 'object' &&
-        parsed !== null &&
-        'intent' in parsed &&
-        typeof parsed.intent === 'string' &&
-        parsed.intent.trim()
-      ) {
-        return parsed.intent.trim();
-      }
-    } catch {
-      return fallback;
-    }
-
-    return fallback;
-  }
-
-  /**
-   * 对表名进行白名单校验并按方言转义。
-   *
-   * @param dbType 数据库类型。
-   * @param table 原始表名（支持 schema.table）。
-   * @returns 可安全拼接到 SQL 的表名。
-   */
-  private escapeTableIdentifier(
-    dbType: DataAnalyseConnectionInput['dbType'],
-    table: string,
-  ): string {
-    const identifierPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
-    const segments = table.split('.').map((segment) => segment.trim());
-
-    if (
-      !segments.length ||
-      segments.some((segment) => !identifierPattern.test(segment))
-    ) {
-      throw new BadRequestException(
-        '表名格式不合法，仅支持字母数字下划线及 schema.table。',
-      );
-    }
-
-    if (dbType === 'postgres') {
-      return segments.map((segment) => `"${segment}"`).join('.');
-    }
-
-    return segments.map((segment) => `\`${segment}\``).join('.');
-  }
-
-  /**
-   * 调用模型生成最终回答。
-   *
-   * @param apiKey 模型 API Key。
-   * @param question 用户问题。
-   * @param intent 识别意图。
-   * @param sql 最终 SQL。
-   * @param rows 查询结果。
-   * @returns 生成的自然语言回答。
-   */
-  private async generateAnswer(
-    apiKey: string,
-    question: string,
-    intent: string,
-    sql: string,
-    rows: Record<string, unknown>[],
-    schema: DataAnalyseTableSchema,
-  ): Promise<string> {
-    const model = this.createChatModel(apiKey, 0.2);
-    const result = await model.invoke(
-      [
-        {
-          content: buildDataAnalyseAnswerPrompt(),
-          role: 'system',
-        },
-        {
-          content: JSON.stringify(
-            {
-              intent,
-              question,
-              rowCount: rows.length,
-              rows: rows.slice(0, ANSWER_ROWS_LIMIT),
-              schema,
-              sql,
-            },
-            null,
-            2,
-          ),
-          role: 'user',
-        },
-      ],
-      this.createDebugRunConfig('data-analyse.answer', {
-        rowCount: rows.length,
-      }),
-    );
-
-    const answer = this.getModelMessage(result).trim();
-    if (!answer) {
-      return rows.length
-        ? `已完成数据查询，共返回 ${rows.length} 行数据。`
-        : '查询执行完成，但未返回符合条件的数据。';
-    }
-
-    return answer;
-  }
-
-  /**
-   * 以流式方式调用模型生成最终回答。
-   *
-   * @param apiKey 模型 API Key。
-   * @param question 用户问题。
-   * @param intent 识别意图。
-   * @param sql 最终 SQL。
-   * @param rows 查询结果。
-   * @param onChunk 每次收到文本分片时触发的回调。
-   * @returns 完整回答文本。
-   */
-  private async generateAnswerStream(
-    apiKey: string,
-    question: string,
-    intent: string,
-    sql: string,
-    rows: Record<string, unknown>[],
-    onChunk: DataAnalyseAnswerChunkHandler,
-    schema: DataAnalyseTableSchema,
-  ): Promise<string> {
-    const model = this.createChatModel(apiKey, 0.2);
-    const answer = await this.streamChatModelAnswer(
-      model,
-      [
-        {
-          content: buildDataAnalyseAnswerPrompt(),
-          role: 'system',
-        },
-        {
-          content: JSON.stringify(
-            {
-              intent,
-              question,
-              rowCount: rows.length,
-              rows: rows.slice(0, ANSWER_ROWS_LIMIT),
-              schema,
-              sql,
-            },
-            null,
-            2,
-          ),
-          role: 'user',
-        },
-      ],
-      onChunk,
-      this.createDebugRunConfig('data-analyse.answer.stream', {
-        rowCount: rows.length,
-      }),
-    );
-
-    if (answer.trim()) {
-      return answer.trim();
-    }
-
-    const fallbackAnswer = rows.length
-      ? `已完成数据查询，共返回 ${rows.length} 行数据。`
-      : '查询执行完成，但未返回符合条件的数据。';
-
-    await onChunk(fallbackAnswer);
-    return fallbackAnswer;
-  }
-
-  /**
-   * 消费 ChatOpenAI 的流式输出并拼接完整文本。
-   *
-   * @param model 已配置的聊天模型。
-   * @param messages 模型输入消息。
-   * @param onChunk 每次收到模型文本分片时触发的回调。
-   * @param runConfig LangChain 调试配置。
-   * @returns 拼接后的完整文本。
-   */
-  private async streamChatModelAnswer(
-    model: ChatOpenAI,
-    messages: Parameters<ChatOpenAI['stream']>[0],
-    onChunk: DataAnalyseAnswerChunkHandler,
-    runConfig?: ReturnType<typeof createLangChainLocalTraceConfig>,
-  ): Promise<string> {
-    const stream = await model.stream(messages, runConfig);
-    let answer = '';
-
-    for await (const chunk of stream) {
-      const text = this.stringifyMessageContent(chunk.content);
-
-      if (!text) {
-        continue;
-      }
-
-      answer += text;
-      await onChunk(text);
-    }
-
-    return answer;
-  }
-
-  /**
-   * 将响应写入消息、产物和 run 完成状态。
-   *
-   * @param input 持久化上下文。
-   */
-  private async persistResponse(input: {
-    conversationId: string;
-    response: DataAnalyseAgentResponse;
-    runId: string;
-    sql: string | null;
-    table: string;
-  }): Promise<void> {
-    const assistantMessage = await this.agentPersistence.createMessage({
-      content: input.response.answer,
-      conversationId: input.conversationId,
-      metadata: this.toJsonRecord({
-        intent: input.response.intent,
-        missingParams: input.response.missingParams,
-        rowCount: input.response.rowCount,
-        sql: input.sql,
-        status: input.response.status,
-        table: input.table,
-      }),
-      role: 'assistant',
-      runId: input.runId,
-    });
-
-    await this.agentPersistence.createArtifact({
-      artifactType: 'data_analyse_result',
-      conversationId: input.conversationId,
-      data: this.toJsonRecord({
-        intent: input.response.intent,
-        rowCount: input.response.rowCount,
-        rowsPreview: input.response.rowsPreview,
-        sql: input.sql,
-        table: input.table,
-      }),
-      messageId: assistantMessage.id,
-      runId: input.runId,
-      title: `data-analyse:${input.table}`,
-    });
-
-    await this.agentPersistence.completeRun({
-      assistantMessageId: assistantMessage.id,
-      output: this.toJsonRecord({
-        response: input.response,
-      }),
-      runId: input.runId,
-    });
-  }
-
-  /**
-   * 持久化失败响应并结束 run。
-   *
-   * @param conversationId 会话 ID。
-   * @param runId 运行 ID。
-   * @param response 失败响应。
-   */
-  private async persistFailedResponse(
-    conversationId: string,
-    runId: string,
-    response: DataAnalyseAgentResponse,
-  ): Promise<void> {
-    const assistantMessage = await this.agentPersistence.createMessage({
-      content: response.answer,
-      conversationId,
-      metadata: this.toJsonRecord({
-        status: response.status,
-      }),
-      role: 'assistant',
-      runId,
-      status: 'failed',
-    });
-
-    await this.agentPersistence.failRun({
-      error: this.toJsonRecord({
-        response,
-      }),
-      runId,
-    });
-
-    await this.agentPersistence.updateMessage({
-      messageId: assistantMessage.id,
-      status: 'failed',
-    });
-  }
-
-  /**
-   * 构建模型调试配置。
-   *
-   * @param runName 运行名。
-   * @param metadata 元数据。
-   * @returns 调试配置或 undefined。
-   */
-  private createDebugRunConfig(
-    runName: string,
-    metadata: Record<string, unknown>,
-  ): ReturnType<typeof createLangChainLocalTraceConfig> {
-    return createLangChainLocalTraceConfig({
-      metadata: {
-        agent: DATA_ANALYSE_AGENT_KEY,
-        model: this.getResponseModelName(),
-        ...metadata,
-      },
-      runName,
-      tags: ['data-analyse'],
-    });
-  }
-
-  /**
-   * 创建模型实例。
-   *
-   * @param apiKey 模型 API Key。
-   * @param temperature 采样温度。
-   * @returns 聊天模型实例。
-   */
-  private createChatModel(apiKey: string, temperature: number): ChatOpenAI {
-    return new ChatOpenAI({
-      apiKey,
-      configuration: {
-        baseURL: OPENAI_COMPATIBLE_BASE_URL,
-      },
-      model: this.getResponseModelName(),
-      temperature,
-    });
-  }
-
-  /**
-   * 获取回答模型名。
-   *
-   * @returns 模型名。
-   */
-  private getResponseModelName(): string {
-    return process.env.OPENAI_MODEL ?? 'qw-plus';
-  }
-
-  /**
-   * 确保模型 API Key 已配置。
-   *
-   * @returns API Key。
-   */
-  private ensureApiKey(): string {
-    const apiKey = process.env.OPENAI_API_KEY?.trim();
-
-    if (!apiKey) {
-      throw new BadRequestException(
-        '未配置 OPENAI_API_KEY，无法执行数据分析。',
-      );
-    }
-
-    return apiKey;
-  }
-
-  /**
-   * 从模型响应读取文本。
-   *
-   * @param result 模型返回值。
-   * @returns 纯文本输出。
-   */
-  private getModelMessage(result: unknown): string {
-    const isRecord = (value: unknown): value is Record<string, unknown> =>
-      typeof value === 'object' && value !== null && !Array.isArray(value);
-
-    if (
-      isRecord(result) &&
-      'content' in result &&
-      typeof result.content === 'string'
-    ) {
-      return result.content;
-    }
-
-    if (
-      isRecord(result) &&
-      'content' in result &&
-      Array.isArray(result.content)
-    ) {
-      return this.stringifyMessageContent(result.content);
-    }
-
-    return '';
-  }
-
-  /**
-   * 将模型消息 content 转换为纯文本。
-   *
-   * @param content 模型消息内容。
-   * @returns 纯文本内容。
-   */
-  private stringifyMessageContent(content: unknown): string {
-    if (typeof content === 'string') {
-      return content;
-    }
-
-    if (!Array.isArray(content)) {
-      return '';
-    }
-
-    return content
-      .map((item) => {
-        if (typeof item === 'string') {
-          return item;
-        }
-
-        if (this.isRecord(item)) {
-          const text = item.text;
-          return typeof text === 'string' ? text : '';
-        }
-
-        return '';
-      })
-      .filter(Boolean)
-      .join('\n');
-  }
-
-  /**
-   * 判断值是否为普通对象。
-   *
-   * @param value 任意值。
-   * @returns 是否为 Record。
-   */
-  private isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
-  }
-
-  /**
-   * 将值转换为可写入 jsonb 的普通对象。
-   *
-   * @param value 任意值。
-   * @returns 标准对象记录。
-   */
-  private toJsonRecord(value: unknown): Record<string, unknown> {
-    return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
   }
 
   /**

@@ -1,0 +1,38 @@
+---
+description: Agent 开发统一规范（分层、类型、常量、校验）
+globs: src/**/*.ts
+alwaysApply: false
+---
+
+# Agent Development Standards
+
+## 目标
+- 新增或改造 Agent 时，保持可维护、可扩展、可复用的统一实现风格。
+
+## 分层约束
+- `*.service.ts` 优先做编排（orchestration），复杂逻辑拆到 `*-answer.service.ts`、`*-persistence.service.ts`、`*-model.service.ts`、`*-execution.service.ts`。
+- 公共能力优先复用 `common` 层（如流式消费、运行持久化），避免在业务 Agent 内重复实现。
+- 优先通过 `index.ts` barrel 导入公共模块，减少深路径耦合。
+
+## 类型与常量约束
+- 禁止在持久化与跨模块调用中使用裸字符串状态/类型，统一使用共享常量（如 `AGENT_MESSAGE_STATUS`、`AGENT_ARTIFACT_TYPE`、`AGENT_MESSAGE_ROLE`、`AGENT_RUN_STATUS`）。
+- 公共服务入参与返回类型必须定义在独立 `*.types.ts`，业务侧按类型契约调用。
+- 跨层 JSON 结构优先复用统一类型（如 `JsonRecord`），避免重复声明 `Record<string, unknown>`。
+- TypeScript/JavaScript 新增函数必须写 JSDoc，说明参数、返回值与用途。
+
+## 配置与可观测性
+- 禁止散落读取 `process.env`，统一走 `common/config/runtime-env.config.ts`。
+- 涉及模型调用的关键链路应保留调试 runConfig（如 LangChain trace）并使用可读的 trace 名称。
+
+## 提交前校验
+- 修改后至少执行：`eslint`（必要时 `--fix`）与 `npm run build`。
+- 若新增公共抽象，必须同步补充字段注释，说明语义与边界。
+
+## 示例
+```ts
+// ❌ BAD: 裸字符串状态
+messageStatus: 'failed'
+
+// ✅ GOOD: 共享常量
+messageStatus: AGENT_MESSAGE_STATUS.FAILED
+```

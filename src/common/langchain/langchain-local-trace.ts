@@ -253,7 +253,7 @@ function resolveToolName(
 
     const id = tool.id;
     if (Array.isArray(id) && id.length > 0) {
-      const last = id[id.length - 1];
+      const last: unknown = id[id.length - 1];
       if (typeof last === 'string' && last.trim()) {
         return last.trim();
       }

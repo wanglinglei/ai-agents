@@ -1,9 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { ChatOpenAI } from '@langchain/openai';
+import {
+  getOpenAIApiKey,
+  getOpenAICompatibleBaseUrl,
+  getOpenAIModelName,
+} from '../../common/config/runtime-env.config';
 
 const TITLE_MAX_LENGTH = 80;
 const DEFAULT_TITLE_MODEL = 'qw-plus';
-const OPENAI_COMPATIBLE_BASE_URL = process.env.OPENAI_COMPATIBLE_BASE_URL;
 const TITLE_GENERATION_PROMPT = `
 你是一个会话标题生成助手。请根据给定上下文生成一个简洁、自然、可读的中文标题。
 
@@ -55,7 +59,7 @@ export class ConversationTitleService {
   private async generateTitleByModel(
     input: ResolveConversationTitleInput,
   ): Promise<string | undefined> {
-    const apiKey = process.env.OPENAI_API_KEY?.trim();
+    const apiKey = getOpenAIApiKey();
 
     if (!apiKey) {
       return undefined;
@@ -65,9 +69,9 @@ export class ConversationTitleService {
       const model = new ChatOpenAI({
         apiKey,
         configuration: {
-          baseURL: OPENAI_COMPATIBLE_BASE_URL,
+          baseURL: getOpenAICompatibleBaseUrl(),
         },
-        model: process.env.OPENAI_MODEL ?? DEFAULT_TITLE_MODEL,
+        model: getOpenAIModelName(DEFAULT_TITLE_MODEL),
         temperature: 0.2,
       });
 

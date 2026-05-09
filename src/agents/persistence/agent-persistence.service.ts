@@ -1,76 +1,26 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import {
+  AGENT_MESSAGE_CONTENT_TYPE,
+  AGENT_MESSAGE_STATUS,
+  AGENT_RUN_STATUS,
+} from '../../common/agents';
+import type {
+  CompleteRunInput,
+  CreateArtifactInput,
+  CreateMessageInput,
+  CreateRunInput,
+  EnsureConversationInput,
+  FailRunInput,
+  UpdateConversationStateInput,
+  UpdateMessageInput,
+} from './agent-persistence.types';
 import { AgentArtifact } from './entities/agent-artifact.entity';
 import { AgentConversation } from './entities/agent-conversation.entity';
 import { AgentMessage } from './entities/agent-message.entity';
 import { AgentRun } from './entities/agent-run.entity';
 import { ConversationTitleService } from './conversation-title.service';
-
-interface EnsureConversationInput {
-  agentKey: string;
-  conversationId: string;
-  initialMessage?: string;
-  metadata?: Record<string, unknown>;
-  state?: Record<string, unknown>;
-  title?: string;
-  titleMetadata?: Record<string, unknown>;
-  userId?: number | null;
-}
-
-interface CreateMessageInput {
-  content: string;
-  contentType?: string;
-  conversationId: string;
-  metadata?: Record<string, unknown>;
-  role: string;
-  runId?: string | null;
-  status?: string;
-}
-
-interface CreateRunInput {
-  agentKey: string;
-  conversationId: string;
-  input?: Record<string, unknown>;
-  model?: string | null;
-  provider?: string | null;
-  userMessageId?: string | null;
-}
-
-interface CompleteRunInput {
-  assistantMessageId?: string | null;
-  output?: Record<string, unknown>;
-  runId: string;
-}
-
-interface FailRunInput {
-  error: Record<string, unknown>;
-  runId: string;
-}
-
-interface UpdateConversationStateInput {
-  conversationId: string;
-  state: Record<string, unknown>;
-}
-
-interface CreateArtifactInput {
-  artifactType: string;
-  conversationId: string;
-  data?: Record<string, unknown>;
-  messageId?: string | null;
-  metadata?: Record<string, unknown>;
-  runId?: string | null;
-  storageUrl?: string | null;
-  title?: string | null;
-}
-
-interface UpdateMessageInput {
-  content?: string;
-  messageId: string;
-  metadata?: Record<string, unknown>;
-  runId?: string | null;
-  status?: string;
-}
 
 /**
  * 通用 Agent 持久化服务，封装会话、消息、运行和产物的基础读写。
@@ -150,12 +100,12 @@ export class AgentPersistenceService {
     return this.messageRepository.save(
       this.messageRepository.create({
         content: input.content,
-        contentType: input.contentType ?? 'text',
+        contentType: input.contentType ?? AGENT_MESSAGE_CONTENT_TYPE.TEXT,
         conversationId: input.conversationId,
         metadata: input.metadata ?? {},
         role: input.role,
         runId: input.runId ?? null,
-        status: input.status ?? 'completed',
+        status: input.status ?? AGENT_MESSAGE_STATUS.COMPLETED,
       }),
     );
   }
@@ -175,7 +125,7 @@ export class AgentPersistenceService {
         model: input.model ?? null,
         provider: input.provider ?? null,
         startedAt: new Date(),
-        status: 'running',
+        status: AGENT_RUN_STATUS.RUNNING,
         userMessageId: input.userMessageId ?? null,
       }),
     );
@@ -199,7 +149,7 @@ export class AgentPersistenceService {
     run.assistantMessageId = input.assistantMessageId ?? null;
     run.completedAt = new Date();
     run.output = input.output ?? {};
-    run.status = 'completed';
+    run.status = AGENT_RUN_STATUS.COMPLETED;
 
     return this.runRepository.save(run);
   }
@@ -221,7 +171,7 @@ export class AgentPersistenceService {
 
     run.completedAt = new Date();
     run.error = input.error;
-    run.status = 'failed';
+    run.status = AGENT_RUN_STATUS.FAILED;
 
     return this.runRepository.save(run);
   }

@@ -7,6 +7,7 @@
  */
 import { DynamicTool } from '@langchain/core/tools';
 import tinify from 'tinify';
+import { getTinifyApiKey as getTinifyApiKeyFromConfig } from '../../common/config/runtime-env.config';
 
 export interface ImageCompressionResult {
   base64: string;
@@ -20,7 +21,7 @@ export interface ImageCompressionResult {
  * @returns Tinify API key from environment variables.
  */
 function getTinifyApiKey(): string {
-  const apiKey = process.env.TINIFY_API_KEY ?? process.env.TINYPNG_API_KEY;
+  const apiKey = getTinifyApiKeyFromConfig();
 
   if (!apiKey) {
     throw new Error('TINIFY_API_KEY or TINYPNG_API_KEY is required.');

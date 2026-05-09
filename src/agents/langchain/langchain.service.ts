@@ -3,6 +3,12 @@ import { StringOutputParser } from '@langchain/core/output_parsers';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
 import { ChatOpenAI } from '@langchain/openai';
 import {
+  getLangChainModelName,
+  getOpenAIApiKey,
+  getOpenAIBaseUrl,
+  hasOpenAIApiKey,
+} from '../../common/config/runtime-env.config';
+import {
   createLangChainLocalTraceConfig,
   isLangChainLocalTraceEnabled,
 } from '../../common/langchain/langchain-local-trace';
@@ -24,10 +30,10 @@ export class LangchainService {
     model: string;
   } {
     return {
-      hasApiKey: Boolean(process.env.OPENAI_API_KEY),
+      hasApiKey: hasOpenAIApiKey(),
       integrated: true,
       localTrace: isLangChainLocalTraceEnabled(),
-      model: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
+      model: getLangChainModelName(),
     };
   }
 
@@ -44,7 +50,7 @@ export class LangchainService {
       );
     }
 
-    const apiKey = process.env.OPENAI_API_KEY;
+    const apiKey = getOpenAIApiKey();
     if (!apiKey) {
       throw new BadRequestException(
         'OPENAI_API_KEY is missing. Please set it before invoking LangChain.',
@@ -58,11 +64,10 @@ export class LangchainService {
       .pipe(
         new ChatOpenAI({
           apiKey,
-          model: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
+          model: getLangChainModelName(),
           temperature: 0.2,
           configuration: {
-            baseURL:
-              process.env.OPENAI_BASE_URL || DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+            baseURL: getOpenAIBaseUrl() || DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
           },
         }),
       )
@@ -73,7 +78,7 @@ export class LangchainService {
       createLangChainLocalTraceConfig({
         metadata: {
           entrypoint: 'LangchainService.invoke',
-          model: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
+          model: getLangChainModelName(),
         },
         runName: 'langchain.invoke',
         tags: ['langchain', 'invoke'],
