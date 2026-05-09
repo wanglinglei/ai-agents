@@ -58,7 +58,8 @@ export class AgentMessage {
   status: string;
 
   @Column({
-    comment: '消息附加结构化数据，例如 intent、天气摘要、模型名和 artifact 引用',
+    comment:
+      '消息附加结构化数据，例如 intent、天气摘要、模型名和 artifact 引用',
     default: () => "'{}'::jsonb",
     type: 'jsonb',
   })

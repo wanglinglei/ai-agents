@@ -44,8 +44,7 @@ import {
 } from './utils/weather-agent-responses';
 import { validateWeatherAgentResult } from './utils/weather-agent-validators';
 
-const OPENAI_COMPATIBLE_BASE_URL =
-  'https://dashscope.aliyuncs.com/compatible-mode/v1';
+const OPENAI_COMPATIBLE_BASE_URL = process.env.OPENAI_COMPATIBLE_BASE_URL;
 const WEATHER_AGENT_KEY = 'weather';
 const WEATHER_CONVERSATION_TTL_MS = 10 * 60 * 1000;
 
@@ -270,7 +269,7 @@ export class WeatherService {
     await this.agentPersistence.ensureConversation({
       agentKey: WEATHER_AGENT_KEY,
       conversationId,
-      title: message.slice(0, 80),
+      initialMessage: message,
     });
 
     const context = await this.buildQueryExecutionContext(

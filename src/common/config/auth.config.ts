@@ -40,6 +40,7 @@ export const DEFAULT_WHITELIST: WhitelistConfig = {
     '/ai-agent/account-manage/',
     '/ai-agent/docx-process/',
     '/ai-agent/weather/',
+    '/ai-agent/data-analyse/',
   ],
   regex: [],
 };

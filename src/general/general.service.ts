@@ -214,7 +214,8 @@ export class GeneralService {
     }
 
     try {
-      const result: UploadImageResult = await this.bitifulService.uploadFile(file);
+      const result: UploadImageResult =
+        await this.bitifulService.uploadFile(file);
       return { url: result.publicUrl, key: result.key };
     } catch (error) {
       throw new BadRequestException(

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AgentPersistenceService } from './agent-persistence.service';
+import { ConversationTitleService } from './conversation-title.service';
 import { AgentArtifact } from './entities/agent-artifact.entity';
 import { AgentConversation } from './entities/agent-conversation.entity';
 import { AgentDefinition } from './entities/agent-definition.entity';
@@ -20,6 +21,6 @@ import { AgentToolCall } from './entities/agent-tool-call.entity';
       AgentToolCall,
     ]),
   ],
-  providers: [AgentPersistenceService],
+  providers: [AgentPersistenceService, ConversationTitleService],
 })
 export class AgentPersistenceModule {}

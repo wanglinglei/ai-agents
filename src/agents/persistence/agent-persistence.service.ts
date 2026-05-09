@@ -5,13 +5,16 @@ import { AgentArtifact } from './entities/agent-artifact.entity';
 import { AgentConversation } from './entities/agent-conversation.entity';
 import { AgentMessage } from './entities/agent-message.entity';
 import { AgentRun } from './entities/agent-run.entity';
+import { ConversationTitleService } from './conversation-title.service';
 
 interface EnsureConversationInput {
   agentKey: string;
   conversationId: string;
+  initialMessage?: string;
   metadata?: Record<string, unknown>;
   state?: Record<string, unknown>;
   title?: string;
+  titleMetadata?: Record<string, unknown>;
   userId?: number | null;
 }
 
@@ -83,6 +86,7 @@ export class AgentPersistenceService {
     private readonly messageRepository: Repository<AgentMessage>,
     @InjectRepository(AgentRun)
     private readonly runRepository: Repository<AgentRun>,
+    private readonly conversationTitleService: ConversationTitleService,
   ) {}
 
   /**
@@ -102,8 +106,26 @@ export class AgentPersistenceService {
     });
 
     if (existing) {
+      if (!existing.title) {
+        const resolvedTitle = await this.conversationTitleService.resolveTitle({
+          agentKey: input.agentKey,
+          message: input.initialMessage,
+          metadata: input.titleMetadata,
+          providedTitle: input.title,
+        });
+        existing.title = resolvedTitle;
+        return this.conversationRepository.save(existing);
+      }
+
       return existing;
     }
+
+    const resolvedTitle = await this.conversationTitleService.resolveTitle({
+      agentKey: input.agentKey,
+      message: input.initialMessage,
+      metadata: input.titleMetadata,
+      providedTitle: input.title,
+    });
 
     return this.conversationRepository.save(
       this.conversationRepository.create({
@@ -112,7 +134,7 @@ export class AgentPersistenceService {
         lastMessageAt: null,
         metadata: input.metadata ?? {},
         state: input.state ?? {},
-        title: input.title ?? null,
+        title: resolvedTitle,
         userId: input.userId ?? null,
       }),
     );
@@ -166,7 +188,9 @@ export class AgentPersistenceService {
    * @returns 更新后的运行记录。
    */
   async completeRun(input: CompleteRunInput): Promise<AgentRun | null> {
-    const run = await this.runRepository.findOne({ where: { id: input.runId } });
+    const run = await this.runRepository.findOne({
+      where: { id: input.runId },
+    });
 
     if (!run) {
       return null;
@@ -187,7 +211,9 @@ export class AgentPersistenceService {
    * @returns 更新后的运行记录。
    */
   async failRun(input: FailRunInput): Promise<AgentRun | null> {
-    const run = await this.runRepository.findOne({ where: { id: input.runId } });
+    const run = await this.runRepository.findOne({
+      where: { id: input.runId },
+    });
 
     if (!run) {
       return null;
