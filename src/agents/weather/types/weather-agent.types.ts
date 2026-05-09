@@ -30,6 +30,8 @@ export interface WeatherAgentStatus {
   hasApiKey: boolean;
   /** 天气 Agent 功能是否已接入当前服务。 */
   integrated: boolean;
+  /** 本地 LangChain 调试日志是否已启用。 */
+  localTrace: boolean;
   /** 当前配置的模型名称。 */
   model: string;
   /** 天气数据提供方名称。 */

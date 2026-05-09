@@ -4,6 +4,10 @@ import { randomUUID } from 'node:crypto';
 import { createAgent } from 'langchain';
 import { AgentPersistenceService } from '../persistence/agent-persistence.service';
 import {
+  createLangChainLocalTraceConfig,
+  isLangChainLocalTraceEnabled,
+} from '../../common/langchain/langchain-local-trace';
+import {
   buildWeatherAgentSystemPrompt,
   buildWeatherAnswerSystemPrompt,
   buildWeatherClarificationSystemPrompt,
@@ -29,6 +33,7 @@ import {
   getChatModelMessage,
   getFinalAgentMessage,
   hasQWeatherToken,
+  stringifyMessageContent,
 } from './utils/weather-agent.utils';
 import {
   buildApiFailureAnswer,
@@ -44,6 +49,8 @@ const OPENAI_COMPATIBLE_BASE_URL =
 const WEATHER_AGENT_KEY = 'weather';
 const WEATHER_CONVERSATION_TTL_MS = 10 * 60 * 1000;
 
+type WeatherAnswerChunkHandler = (chunk: string) => void | Promise<void>;
+
 @Injectable()
 export class WeatherService {
   constructor(private readonly agentPersistence: AgentPersistenceService) {}
@@ -57,6 +64,7 @@ export class WeatherService {
     return {
       hasApiKey: Boolean(process.env.OPENAI_API_KEY),
       integrated: true,
+      localTrace: isLangChainLocalTraceEnabled(),
       model: process.env.OPENAI_MODEL || '',
       provider: 'QWeather',
     };
@@ -221,6 +229,34 @@ export class WeatherService {
   }
 
   /**
+   * 查询天气并以模型生成片段形式回调最终回答文本。
+   *
+   * @param message 自然语言天气请求。
+   * @param conversationId 多轮上下文使用的可选会话 ID。
+   * @param onAnswerChunk 每次收到回答文本片段时触发的回调。
+   * @returns 天气数据和完整回答。
+   */
+  async streamQuery(
+    message: string,
+    conversationId: string | undefined,
+    onAnswerChunk: WeatherAnswerChunkHandler,
+  ): Promise<WeatherAgentResponse> {
+    const normalizedQuestion = message.trim();
+
+    if (!normalizedQuestion) {
+      throw new BadRequestException('请提供天气查询内容。');
+    }
+
+    const activeConversationId = this.resolveConversationId(conversationId);
+
+    return this.queryByMessage(
+      normalizedQuestion,
+      activeConversationId,
+      onAnswerChunk,
+    );
+  }
+
+  /**
    * 在查询天气数据前解析自然语言天气请求。
    *
    * @param message 用户自然语言请求。
@@ -229,6 +265,7 @@ export class WeatherService {
   private async queryByMessage(
     message: string,
     conversationId: string,
+    onAnswerChunk?: WeatherAnswerChunkHandler,
   ): Promise<WeatherAgentResponse> {
     await this.agentPersistence.ensureConversation({
       agentKey: WEATHER_AGENT_KEY,
@@ -270,6 +307,7 @@ export class WeatherService {
           message,
           context,
           agentResult,
+          onAnswerChunk,
         );
 
         await this.persistWeatherResponse(response, run.id);
@@ -282,6 +320,7 @@ export class WeatherService {
           message,
           context,
           agentResult,
+          onAnswerChunk,
         );
 
         await this.persistWeatherResponse(response, run.id);
@@ -293,6 +332,7 @@ export class WeatherService {
         message,
         context,
         agentResult,
+        onAnswerChunk,
       );
 
       await this.persistWeatherResponse(response, run.id);
@@ -410,6 +450,7 @@ export class WeatherService {
     message: string,
     context: WeatherQueryExecutionContext,
     agentResult: WeatherAgentClarificationResult,
+    onAnswerChunk?: WeatherAnswerChunkHandler,
   ): Promise<WeatherAgentResponse> {
     const activeConversationId = this.resolveConversationId(
       context.normalizedConversationId,
@@ -420,13 +461,22 @@ export class WeatherService {
     };
     const lastDemand =
       partialIntent.demand || context.conversationContext?.lastDemand;
-    const answer = await this.generateClarificationAnswer(
-      context.originalDemandMessage,
-      context.apiKey,
-      partialIntent,
-      agentResult.missingParams,
-      agentResult.answer,
-    );
+    const answer = onAnswerChunk
+      ? await this.generateClarificationAnswerStream(
+          context.originalDemandMessage,
+          context.apiKey,
+          partialIntent,
+          agentResult.missingParams,
+          agentResult.answer,
+          onAnswerChunk,
+        )
+      : await this.generateClarificationAnswer(
+          context.originalDemandMessage,
+          context.apiKey,
+          partialIntent,
+          agentResult.missingParams,
+          agentResult.answer,
+        );
 
     await this.saveConversationContext(activeConversationId, {
       lastDemand,
@@ -461,6 +511,7 @@ export class WeatherService {
     message: string,
     context: WeatherQueryExecutionContext,
     agentResult: WeatherAgentAnswerResult,
+    onAnswerChunk?: WeatherAnswerChunkHandler,
   ): Promise<WeatherAgentResponse> {
     const intent = agentResult.intent;
     const weather = agentResult.weather;
@@ -469,15 +520,29 @@ export class WeatherService {
     );
     const lastDemand = intent.demand || context.conversationContext?.lastDemand;
     const forecast = this.findForecastByDate(weather, intent.date);
-    const answer =
-      (await this.generateDemandAwareAnswer(
-        context.originalDemandMessage,
-        context.apiKey,
-        intent,
-        weather,
-        forecast,
-        agentResult.answer,
-      )) || buildFallbackAnswer(weather, intent, forecast);
+    let answer = onAnswerChunk
+      ? await this.generateDemandAwareAnswerStream(
+          context.originalDemandMessage,
+          context.apiKey,
+          intent,
+          weather,
+          forecast,
+          agentResult.answer,
+          onAnswerChunk,
+        )
+      : await this.generateDemandAwareAnswer(
+          context.originalDemandMessage,
+          context.apiKey,
+          intent,
+          weather,
+          forecast,
+          agentResult.answer,
+        );
+
+    if (!answer) {
+      answer = buildFallbackAnswer(weather, intent, forecast);
+      await onAnswerChunk?.(answer);
+    }
 
     await this.saveConversationContext(activeConversationId, {
       lastDemand,
@@ -512,6 +577,7 @@ export class WeatherService {
     message: string,
     context: WeatherQueryExecutionContext,
     agentResult: WeatherAgentReuseResult,
+    onAnswerChunk?: WeatherAnswerChunkHandler,
   ): Promise<WeatherAgentResponse> {
     const previousContext = context.conversationContext;
 
@@ -544,15 +610,29 @@ export class WeatherService {
       ...(lastDemand ? { demand: lastDemand } : {}),
     };
     const forecast = this.findForecastByDate(weather, normalizedIntent.date);
-    const answer =
-      (await this.generateDemandAwareAnswer(
-        context.originalDemandMessage,
-        context.apiKey,
-        normalizedIntent,
-        weather,
-        forecast,
-        agentResult.answer,
-      )) || buildFallbackAnswer(weather, normalizedIntent, forecast);
+    let answer = onAnswerChunk
+      ? await this.generateDemandAwareAnswerStream(
+          context.originalDemandMessage,
+          context.apiKey,
+          normalizedIntent,
+          weather,
+          forecast,
+          agentResult.answer,
+          onAnswerChunk,
+        )
+      : await this.generateDemandAwareAnswer(
+          context.originalDemandMessage,
+          context.apiKey,
+          normalizedIntent,
+          weather,
+          forecast,
+          agentResult.answer,
+        );
+
+    if (!answer) {
+      answer = buildFallbackAnswer(weather, normalizedIntent, forecast);
+      await onAnswerChunk?.(answer);
+    }
 
     await this.saveConversationContext(activeConversationId, {
       lastDemand,
@@ -690,6 +770,28 @@ export class WeatherService {
   }
 
   /**
+   * 构建天气 Agent 调试运行配置。
+   *
+   * @param runName 本次运行名称。
+   * @param metadata 附加到本次运行的业务元数据。
+   * @returns 启用本地日志时返回 runnable 配置，否则返回 undefined。
+   */
+  private createWeatherDebugRunConfig(
+    runName: string,
+    metadata: Record<string, unknown> = {},
+  ): ReturnType<typeof createLangChainLocalTraceConfig> {
+    return createLangChainLocalTraceConfig({
+      metadata: {
+        agent: WEATHER_AGENT_KEY,
+        model: this.getResponseModelName(),
+        ...metadata,
+      },
+      runName,
+      tags: ['weather'],
+    });
+  }
+
+  /**
    * 创建面向 DashScope 的 OpenAI 兼容聊天模型。
    *
    * @param apiKey OpenAI 兼容 API Key。
@@ -699,7 +801,7 @@ export class WeatherService {
   private createChatModel(apiKey: string, temperature: number): ChatOpenAI {
     return new ChatOpenAI({
       apiKey,
-      model: process.env.OPENAI_MODEL,
+      model: this.getResponseModelName(),
       temperature,
       configuration: {
         baseURL: OPENAI_COMPATIBLE_BASE_URL,
@@ -724,14 +826,19 @@ export class WeatherService {
       systemPrompt: buildWeatherAgentSystemPrompt(today),
       tools: [cityLookupTool, weatherTool],
     });
-    const result = await agent.invoke({
-      messages: [
-        {
-          content: `用户输入：${message}`,
-          role: 'user',
-        },
-      ],
-    });
+    const result = await agent.invoke(
+      {
+        messages: [
+          {
+            content: `用户输入：${message}`,
+            role: 'user',
+          },
+        ],
+      },
+      this.createWeatherDebugRunConfig('weather.agent.invoke', {
+        phase: 'intent-and-tool',
+      }),
+    );
     const output = getFinalAgentMessage(result);
 
     if (!output) {
@@ -775,23 +882,81 @@ export class WeatherService {
     agentAnswer: string,
   ): Promise<string> {
     const model = this.createChatModel(apiKey, 0.3);
-    const result = await model.invoke([
-      {
-        content: buildWeatherClarificationSystemPrompt(),
-        role: 'system',
-      },
-      {
-        content: JSON.stringify({
-          agentAnswer,
-          intent,
-          missingParams,
-          userQuestion: message,
-        }),
-        role: 'user',
-      },
-    ]);
+    const result = await model.invoke(
+      [
+        {
+          content: buildWeatherClarificationSystemPrompt(),
+          role: 'system',
+        },
+        {
+          content: JSON.stringify({
+            agentAnswer,
+            intent,
+            missingParams,
+            userQuestion: message,
+          }),
+          role: 'user',
+        },
+      ],
+      this.createWeatherDebugRunConfig('weather.clarification.invoke', {
+        missingParams,
+        phase: 'clarification',
+      }),
+    );
 
     return getChatModelMessage(result) || agentAnswer;
+  }
+
+  /**
+   * 以流式方式生成自然追问回答。
+   *
+   * @param message 用户原始问题。
+   * @param apiKey OpenAI 兼容 API Key。
+   * @param intent 已解析的部分天气意图。
+   * @param missingParams 缺失的天气查询参数。
+   * @param agentAnswer 工具调用型 Agent 生成的追问草稿。
+   * @param onChunk 每次收到模型文本片段时触发的回调。
+   * @returns 完整自然语言追问回答。
+   */
+  private async generateClarificationAnswerStream(
+    message: string,
+    apiKey: string,
+    intent: Partial<WeatherIntent>,
+    missingParams: string[],
+    agentAnswer: string,
+    onChunk: WeatherAnswerChunkHandler,
+  ): Promise<string> {
+    const model = this.createChatModel(apiKey, 0.3);
+    const answer = await this.streamChatModelAnswer(
+      model,
+      [
+        {
+          content: buildWeatherClarificationSystemPrompt(),
+          role: 'system',
+        },
+        {
+          content: JSON.stringify({
+            agentAnswer,
+            intent,
+            missingParams,
+            userQuestion: message,
+          }),
+          role: 'user',
+        },
+      ],
+      onChunk,
+      this.createWeatherDebugRunConfig('weather.clarification.stream', {
+        missingParams,
+        phase: 'clarification',
+      }),
+    );
+
+    if (answer) {
+      return answer;
+    }
+
+    await onChunk(agentAnswer);
+    return agentAnswer;
   }
 
   /**
@@ -814,23 +979,112 @@ export class WeatherService {
     agentAnswer: string,
   ): Promise<string> {
     const model = this.createChatModel(apiKey, 0.3);
-    const result = await model.invoke([
-      {
-        content: buildWeatherAnswerSystemPrompt(),
-        role: 'system',
-      },
-      {
-        content: JSON.stringify({
-          agentAnswer,
-          forecast,
-          intent,
-          userQuestion: message,
-          weather,
-        }),
-        role: 'user',
-      },
-    ]);
+    const result = await model.invoke(
+      [
+        {
+          content: buildWeatherAnswerSystemPrompt(),
+          role: 'system',
+        },
+        {
+          content: JSON.stringify({
+            agentAnswer,
+            forecast,
+            intent,
+            userQuestion: message,
+            weather,
+          }),
+          role: 'user',
+        },
+      ],
+      this.createWeatherDebugRunConfig('weather.answer.invoke', {
+        city: intent.city,
+        date: intent.date,
+        phase: 'answer',
+      }),
+    );
 
     return getChatModelMessage(result);
+  }
+
+  /**
+   * 以流式方式根据用户请求和天气数据生成贴合需求的回答。
+   *
+   * @param message 用户原始问题。
+   * @param apiKey OpenAI 兼容 API Key。
+   * @param intent 已解析的天气意图。
+   * @param weather 标准化后的天气结果。
+   * @param forecast 请求日期对应的预报数据。
+   * @param agentAnswer 工具调用型 Agent 生成的回答草稿。
+   * @param onChunk 每次收到模型文本片段时触发的回调。
+   * @returns 完整自然语言回答。
+   */
+  private async generateDemandAwareAnswerStream(
+    message: string,
+    apiKey: string,
+    intent: WeatherIntent,
+    weather: WeatherResult,
+    forecast: WeatherForecastDay | undefined,
+    agentAnswer: string,
+    onChunk: WeatherAnswerChunkHandler,
+  ): Promise<string> {
+    const model = this.createChatModel(apiKey, 0.3);
+
+    return this.streamChatModelAnswer(
+      model,
+      [
+        {
+          content: buildWeatherAnswerSystemPrompt(),
+          role: 'system',
+        },
+        {
+          content: JSON.stringify({
+            agentAnswer,
+            forecast,
+            intent,
+            userQuestion: message,
+            weather,
+          }),
+          role: 'user',
+        },
+      ],
+      onChunk,
+      this.createWeatherDebugRunConfig('weather.answer.stream', {
+        city: intent.city,
+        date: intent.date,
+        phase: 'answer',
+      }),
+    );
+  }
+
+  /**
+   * 消费 ChatOpenAI 的流式输出并拼接完整文本。
+   *
+   * @param model 已配置的聊天模型。
+   * @param messages 模型输入消息。
+   * @param onChunk 每次收到模型文本片段时触发的回调。
+   * @param runConfig LangChain 调试配置。
+   * @returns 拼接后的完整文本。
+   */
+  private async streamChatModelAnswer(
+    model: ChatOpenAI,
+    messages: Parameters<ChatOpenAI['stream']>[0],
+    onChunk: WeatherAnswerChunkHandler,
+    runConfig?: ReturnType<typeof createLangChainLocalTraceConfig>,
+  ): Promise<string> {
+    const stream = await model.stream(messages, runConfig);
+    let answer = '';
+
+    for await (const chunk of stream) {
+      const text = stringifyMessageContent(chunk.content);
+
+      if (!text) {
+        continue;
+      }
+
+      answer += text;
+      await onChunk(text);
+    }
+
+    return answer.trim();
   }
 }

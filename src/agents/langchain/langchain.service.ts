@@ -2,6 +2,13 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { StringOutputParser } from '@langchain/core/output_parsers';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
 import { ChatOpenAI } from '@langchain/openai';
+import {
+  createLangChainLocalTraceConfig,
+  isLangChainLocalTraceEnabled,
+} from '../../common/langchain/langchain-local-trace';
+
+const DEFAULT_OPENAI_COMPATIBLE_BASE_URL =
+  'https://dashscope.aliyuncs.com/compatible-mode/v1';
 
 @Injectable()
 export class LangchainService {
@@ -10,10 +17,16 @@ export class LangchainService {
    *
    * @returns Service status for integration checks.
    */
-  getStatus(): { integrated: boolean; hasApiKey: boolean; model: string } {
+  getStatus(): {
+    hasApiKey: boolean;
+    integrated: boolean;
+    localTrace: boolean;
+    model: string;
+  } {
     return {
-      integrated: true,
       hasApiKey: Boolean(process.env.OPENAI_API_KEY),
+      integrated: true,
+      localTrace: isLangChainLocalTraceEnabled(),
       model: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
     };
   }
@@ -47,10 +60,24 @@ export class LangchainService {
           apiKey,
           model: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
           temperature: 0.2,
+          configuration: {
+            baseURL:
+              process.env.OPENAI_BASE_URL || DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+          },
         }),
       )
       .pipe(new StringOutputParser());
 
-    return chain.invoke({ input: prompt });
+    return chain.invoke(
+      { input: prompt },
+      createLangChainLocalTraceConfig({
+        metadata: {
+          entrypoint: 'LangchainService.invoke',
+          model: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
+        },
+        runName: 'langchain.invoke',
+        tags: ['langchain', 'invoke'],
+      }),
+    );
   }
 }

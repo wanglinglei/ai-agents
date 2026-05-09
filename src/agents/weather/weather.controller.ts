@@ -66,17 +66,24 @@ export class WeatherController {
       body.conversationId,
     );
 
+    response.status(200);
     response.setHeader('Content-Type', 'text/plain; charset=utf-8');
     response.setHeader('Cache-Control', 'no-cache, no-transform');
     response.setHeader('X-Accel-Buffering', 'no');
     response.setHeader('X-Conversation-Id', conversationId);
     response.setHeader('Access-Control-Expose-Headers', 'X-Conversation-Id');
+    response.flushHeaders();
 
     try {
-      const result = await this.weatherService.query(message, conversationId);
-      await this.writeAnswerStream(response, result.answer);
+      await this.weatherService.streamQuery(
+        message,
+        conversationId,
+        async (chunk) => {
+          await this.writeResponseChunk(response, chunk);
+        },
+      );
     } catch (error) {
-      await this.writeAnswerStream(
+      await this.writeResponseChunk(
         response,
         error instanceof Error ? error.message : '天气查询失败，请稍后再试。',
       );
@@ -86,21 +93,24 @@ export class WeatherController {
   }
 
   /**
-   * Writes answer text in small chunks so the frontend can render progressively.
+   * Writes a streamed answer chunk and waits for transport backpressure when needed.
    *
    * @param response Express response used for chunked output.
-   * @param answer Final answer text to stream.
+   * @param chunk Answer text chunk to write.
    */
-  private async writeAnswerStream(
+  private async writeResponseChunk(
     response: Response,
-    answer: string,
+    chunk: string,
   ): Promise<void> {
-    const chunkSize = 8;
+    if (!chunk || response.writableEnded) {
+      return;
+    }
 
-    for (let index = 0; index < answer.length; index += chunkSize) {
-      response.write(answer.slice(index, index + chunkSize));
+    const canContinue = response.write(chunk);
+
+    if (!canContinue) {
       await new Promise<void>((resolve) => {
-        setTimeout(resolve, 0);
+        response.once('drain', resolve);
       });
     }
   }

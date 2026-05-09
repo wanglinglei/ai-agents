@@ -11,7 +11,12 @@ export class LangchainController {
    * @returns LangChain configuration status.
    */
   @Get('status')
-  getStatus(): { integrated: boolean; hasApiKey: boolean; model: string } {
+  getStatus(): {
+    hasApiKey: boolean;
+    integrated: boolean;
+    localTrace: boolean;
+    model: string;
+  } {
     return this.langchainService.getStatus();
   }
 
