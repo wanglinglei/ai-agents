@@ -107,47 +107,76 @@ Authorization: Bearer <token>
 }
 ```
 
-## 主要接口
+## Agent 介绍
 
-### 基础接口
+### Weather Agent（天气问答）
 
-- `GET /ai-service`：默认欢迎接口。
-- `GET /ai-service/general/health`：通用健康检查。
-- `GET /ai-service/user/health`：用户模块健康检查。
+- 作用：结合城市信息、自然语言问题和天气工具，生成可读的天气结论与出行建议。
+- 输入方式：支持 `city`、`question`、`message` 等多种查询参数组合。
+- 配置依赖：需要 `OPENAI_API_KEY`、`WEATHER_API_TOKEN`、`WEATHER_API_HOST`。
+- 主要接口：`POST /ai-service/weather/query/stream`（`status` 仅用于配置状态检查）。
 
-### 用户
+#### 业务流程图
 
-- `POST /ai-service/user/register`：账号注册。请求体包含 `username`、`password`、`captcha`，可选 `nickname`、`email`、`avatar`、`gender`。
-- `POST /ai-service/user/login`：账号密码登录。请求体包含 `username`、`password`、`captcha`。
-- `POST /ai-service/user/emailLogin`：邮箱验证码登录。请求体包含 `email`、`emailCode`。
-- `GET /ai-service/user/profile`：获取当前登录用户资料。
-- `POST /ai-service/user/update`：更新用户资料。
-- `GET /ai-service/user/admin/userList?page=1&pageSize=10`：获取用户列表。
+```mermaid
+flowchart TD
+  A[客户端 POST /weather/query/stream] --> B[WeatherController 参数校验]
+  B --> C[生成或复用 conversationId]
+  C --> D[WeatherService streamQuery]
+  D --> E[意图理解与工具编排]
+  E --> F[调用 cityLookupTool / weatherTool]
+  F --> G[WeatherResponseService 生成回答]
+  G --> H[AgentPersistenceService 持久化会话与消息]
+  H --> I[分片流式返回文本给客户端]
+```
 
-### 支付宝授权
+### Data Analyse Agent（数据分析）
 
-- `POST /ai-service/alipay-auth/login`：通过支付宝 `authCode` 登录。请求体包含 `authCode`。
-- `POST /ai-service/alipay-auth/getUserInfo`：调试接口，通过 `accessToken` 获取支付宝用户信息。
+- 作用：围绕数据库 Schema 进行安全 SQL 生成与执行，并返回结构化分析结果。
+- 适用场景：报表查询、业务数据探索、面向问题的快速数据核对。
+- 配置依赖：需要可用的 PostgreSQL 连接配置以及大模型相关配置。
+- 主要接口：`POST /ai-service/data-analyse/query/stream`（`status` 仅用于配置状态检查）。
 
-### 通用能力
+#### 业务流程图
 
-- `GET /ai-service/general/captcha`：获取图形验证码，返回 base64 SVG 图片。
-- `POST /ai-service/general/emailCode`：发送邮箱验证码。请求体包含 `email`。
-- `POST /ai-service/general/upload`：上传图片，字段名为 `file`，最大 10 MB，支持 jpeg、png、gif、webp、svg。
+```mermaid
+flowchart TD
+  A[客户端 POST /data-analyse/query/stream] --> B[DataAnalyseController 校验请求体]
+  B --> C[生成或复用 conversationId]
+  C --> D[DataAnalyseService streamQuery]
+  D --> E[DataAnalyseExecutionService 工具调用执行]
+  E --> F[Schema 检查与安全 SQL 生成]
+  F --> G[执行 SQL 并获取结果集]
+  G --> H[DataAnalyseResponseService 生成自然语言回答]
+  H --> I[持久化 SQL 与会话结果]
+  I --> J[流式返回分析文本与元信息]
+```
 
-### LangChain
+### Boundary SVG Agent（行政区边界 SVG 生成）
 
-- `GET /ai-service/langchain/status`：查看 LangChain 配置状态。
-- `GET /ai-service/langchain/invoke?prompt=Hello`：使用指定 prompt 调用大模型。
+- 作用：根据地理边界查询和样式意图，生成可用于可视化场景的 SVG 边界图形。
+- 能力特点：支持行政区识别、批量边界获取、样式解析与图形产物输出。
+- 配置依赖：依赖大模型配置，部分流程需要外部地图/边界数据源能力。
+- 主要接口：`POST /ai-service/boundary-svg/query/stream`（`status` 仅用于配置状态检查）。
 
-### 天气 Agent
+#### 业务流程图
 
-- `GET /ai-service/weather/status`：查看天气 Agent 配置状态。
-- `GET /ai-service/weather/query?city=杭州`：查询城市天气并生成出行建议。
-- `GET /ai-service/weather/query?message=明天上海适合跑步吗`：使用自然语言查询天气。
-- `GET /ai-service/weather/query?city=北京&question=周末适合露营吗`：结合城市和问题查询天气。
-
-天气 Agent 需要同时配置 `OPENAI_API_KEY` 和 `WEATHER_API_TOKEN`。当前大模型请求使用 OpenAI 兼容格式，并默认走阿里云 DashScope 兼容地址。
+```mermaid
+flowchart TD
+  A[客户端 POST /boundary-svg/query/stream] --> B[BoundarySvgController 参数校验]
+  B --> C[生成或复用 conversationId]
+  C --> D[BoundarySvgService streamQuery]
+  D --> E[boundaryIntentParseTool 解析意图]
+  E --> F[cityCodeSearch / boundaryFetch / boundaryBatchFetch]
+  F --> G{是否需要 SVG}
+  G -- 是 --> H[svgStyleIntentParseTool + buildBoundarySvg]
+  G -- 否 --> I[仅返回边界数据结论]
+  H --> J[上传 GeoJSON/SVG 产物并生成可访问链接]
+  I --> K[拼装最终回答]
+  J --> K
+  K --> L[持久化会话、工具调用与产物]
+  L --> M[流式返回回答文本]
+```
 
 ## 测试与代码检查
 
