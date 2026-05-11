@@ -100,6 +100,24 @@ export function getWeatherApiHost(): string | undefined {
 }
 
 /**
+ * 读取 Tavily API Key。
+ *
+ * @returns Tavily API Key，缺失时返回 undefined。
+ */
+export function getTavilyApiKey(): string | undefined {
+  return readEnv('TAVILY_API_KEY');
+}
+
+/**
+ * 判断是否已配置 Tavily API Key。
+ *
+ * @returns 是否存在 Tavily API Key。
+ */
+export function hasTavilyApiKey(): boolean {
+  return Boolean(getTavilyApiKey());
+}
+
+/**
  * 读取 LangChain 本地 trace 开关原始值。
  *
  * @returns 开关值，未配置时返回 undefined。

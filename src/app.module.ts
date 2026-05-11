@@ -9,6 +9,7 @@ import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { GeneralModule } from './general/general.module';
 import { DataAnalyseModule } from './agents/data-analyse/data-analyse.module';
 import { LangchainModule } from './agents/langchain/langchain.module';
+import { BoundarySvgModule } from './agents/boundary-svg/boundary-svg.module';
 import { WeatherModule } from './agents/weather/weather.module';
 import { UserModule } from './user/user.module';
 
@@ -30,6 +31,7 @@ import { UserModule } from './user/user.module';
     GeneralModule,
     DataAnalyseModule,
     LangchainModule,
+    BoundarySvgModule,
     WeatherModule,
   ],
   controllers: [AppController],

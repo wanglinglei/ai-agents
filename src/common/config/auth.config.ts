@@ -41,6 +41,7 @@ export const DEFAULT_WHITELIST: WhitelistConfig = {
     '/ai-agent/docx-process/',
     '/ai-agent/weather/',
     '/ai-agent/data-analyse/',
+    '/ai-agent/boundary-svg/',
   ],
   regex: [],
 };

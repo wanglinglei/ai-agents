@@ -56,6 +56,8 @@ export type AgentMessageContentType =
 export const AGENT_ARTIFACT_TYPE = {
   /** 数据分析结果产物。 */
   DATA_ANALYSE_RESULT: 'data_analyse_result',
+  /** 行政边界 SVG 结果产物。 */
+  BOUNDARY_SVG_RESULT: 'boundary_svg_result',
   /** 天气查询结果产物。 */
   WEATHER_RESULT: 'weather_result',
 } as const;

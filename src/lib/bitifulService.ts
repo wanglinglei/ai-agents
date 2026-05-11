@@ -20,6 +20,13 @@ export interface DeleteFileResult {
   success: boolean;
 }
 
+export interface UploadBufferInput {
+  buffer: Buffer;
+  cacheControl?: string;
+  contentType?: string;
+  fileName?: string;
+}
+
 dotenv.config();
 
 @Injectable()
@@ -88,16 +95,39 @@ export class BitifulService {
 
     const ext = file.originalname.split('.').pop() || 'bin';
     const contentType = file.mimetype || this.getContentTypeByExt(ext);
-    const key = this.generateFileKey(file.originalname);
-    this.logger.log(`准备上传文件到缤纷云, key: ${key}, size: ${file.size}`);
+    return this.uploadBuffer({
+      buffer: file.buffer,
+      contentType,
+      fileName: file.originalname,
+    });
+  }
+
+  /**
+   * 上传 Buffer 数据到缤纷云对象存储。
+   *
+   * @param input 上传入参。
+   * @returns 上传结果。
+   */
+  async uploadBuffer(input: UploadBufferInput): Promise<UploadImageResult> {
+    if (!input.buffer?.length) {
+      throw new Error('上传内容不能为空');
+    }
+
+    const fileName = input.fileName?.trim();
+    const ext = fileName?.split('.').pop() || 'bin';
+    const contentType = input.contentType || this.getContentTypeByExt(ext);
+    const key = this.generateFileKey(fileName);
+    this.logger.log(
+      `准备上传文件到缤纷云, key: ${key}, size: ${input.buffer.length}`,
+    );
 
     const result = await this.s3Client.send(
       new PutObjectCommand({
         Bucket: this.bucket,
         Key: key,
-        Body: file.buffer,
+        Body: input.buffer,
         ContentType: contentType,
-        CacheControl: 'public, max-age=31536000',
+        CacheControl: input.cacheControl || 'public, max-age=31536000',
       }),
     );
 
@@ -153,6 +183,8 @@ export class BitifulService {
       gif: 'image/gif',
       webp: 'image/webp',
       svg: 'image/svg+xml',
+      geojson: 'application/geo+json; charset=utf-8',
+      json: 'application/json; charset=utf-8',
       pdf: 'application/pdf',
       doc: 'application/msword',
       docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',

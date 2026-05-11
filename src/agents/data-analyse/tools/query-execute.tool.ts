@@ -49,7 +49,9 @@ export async function executeReadonlyQuery(
  * @param dataSource 已初始化的数据源。
  * @returns 可供 LangChain Agent 调用的结构化 Tool。
  */
-export function createQueryExecuteTool(dataSource: DataSource): DynamicStructuredTool {
+export function createQueryExecuteTool(
+  dataSource: DataSource,
+): DynamicStructuredTool {
   return tool(
     async (input: { sql: string }): Promise<QueryExecuteResult> =>
       executeReadonlyQuery(dataSource, input.sql),
