@@ -51,6 +51,7 @@ const AGENT_KEY = 'boundary-svg';
 const CONTEXT_TTL_MS = 10 * 60 * 1000;
 const FIXED_YEAR = 2023 as const;
 const GEOJSON_CONTENT_TYPE = 'application/geo+json; charset=utf-8';
+const GEOJSON_STORAGE_URL_METADATA_KEY = 'geojsonStorageUrl';
 
 type BoundarySvgAnswerChunkHandler = (chunk: string) => void | Promise<void>;
 
@@ -475,15 +476,15 @@ export class BoundarySvgService {
         conversationId,
       );
 
-    if (!context || typeof context.updatedAt !== 'number') {
-      return undefined;
+    if (context && typeof context.updatedAt === 'number') {
+      if (Date.now() - context.updatedAt <= CONTEXT_TTL_MS) {
+        return context;
+      }
+
+      return this.recoverConversationContextFromHistory(conversationId);
     }
 
-    if (Date.now() - context.updatedAt > CONTEXT_TTL_MS) {
-      return undefined;
-    }
-
-    return context;
+    return this.recoverConversationContextFromHistory(conversationId);
   }
 
   /**
@@ -503,6 +504,60 @@ export class BoundarySvgService {
         updatedAt: Date.now(),
       },
     });
+  }
+
+  /**
+   * 当会话上下文过期或缺失时，从最近消息中的缤纷云 URL 回补 GeoJSON。
+   *
+   * @param conversationId 会话 ID。
+   * @returns 回补后的上下文，无法回补时返回 undefined。
+   */
+  private async recoverConversationContextFromHistory(
+    conversationId: string,
+  ): Promise<BoundarySvgConversationContext | undefined> {
+    const metadata =
+      await this.agentPersistence.getLatestAssistantMessageMetadata(
+        conversationId,
+      );
+    const storageUrl = this.pickStringFromRecord(
+      metadata,
+      GEOJSON_STORAGE_URL_METADATA_KEY,
+    );
+    if (!storageUrl) {
+      return undefined;
+    }
+
+    try {
+      const response = await fetch(storageUrl);
+      if (!response.ok) {
+        return undefined;
+      }
+
+      const payload: unknown = await response.json();
+      if (!this.isJsonRecord(payload)) {
+        return undefined;
+      }
+
+      const recoveredContext: BoundarySvgConversationContext = {
+        lastBoundaryData: payload,
+        lastCityCode: this.pickStringFromRecord(metadata, 'cityCode'),
+        lastCityName: this.pickStringFromRecord(metadata, 'cityName'),
+        lastNeedSvg: this.pickBooleanFromRecord(metadata, 'needSvg'),
+        lastSvgStyle: this.pickSvgStyleFromRecord(metadata, 'svgStyle'),
+        updatedAt: Date.now(),
+      };
+      await this.saveConversationContext(conversationId, {
+        lastBoundaryData: recoveredContext.lastBoundaryData,
+        lastCityCode: recoveredContext.lastCityCode,
+        lastCityName: recoveredContext.lastCityName,
+        lastNeedSvg: recoveredContext.lastNeedSvg,
+        lastSvgStyle: recoveredContext.lastSvgStyle,
+      });
+
+      return recoveredContext;
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -533,6 +588,80 @@ export class BoundarySvgService {
    */
   private toJsonRecord(value: unknown): Record<string, unknown> {
     return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+  }
+
+  /**
+   * 判断值是否为可用 JSON 对象（排除数组和 null）。
+   *
+   * @param value 任意值。
+   * @returns 是否为 JSON 对象。
+   */
+  private isJsonRecord(value: unknown): value is JsonRecord {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
+  }
+
+  /**
+   * 从对象中读取字符串字段。
+   *
+   * @param record 来源对象。
+   * @param key 字段名。
+   * @returns 字符串值，缺失或类型不匹配时返回 undefined。
+   */
+  private pickStringFromRecord(
+    record: Record<string, unknown> | undefined,
+    key: string,
+  ): string | undefined {
+    const value = record?.[key];
+    return typeof value === 'string' ? value : undefined;
+  }
+
+  /**
+   * 从对象中读取布尔字段。
+   *
+   * @param record 来源对象。
+   * @param key 字段名。
+   * @returns 布尔值，缺失或类型不匹配时返回 undefined。
+   */
+  private pickBooleanFromRecord(
+    record: Record<string, unknown> | undefined,
+    key: string,
+  ): boolean | undefined {
+    const value = record?.[key];
+    return typeof value === 'boolean' ? value : undefined;
+  }
+
+  /**
+   * 从消息 metadata 里读取 SVG 样式快照。
+   *
+   * @param record 来源对象。
+   * @param key 字段名。
+   * @returns 样式对象，缺失或类型不匹配时返回 undefined。
+   */
+  private pickSvgStyleFromRecord(
+    record: Record<string, unknown> | undefined,
+    key: string,
+  ): BoundarySvgStyle | undefined {
+    const value = record?.[key];
+    if (!this.isJsonRecord(value)) {
+      return undefined;
+    }
+
+    const fillColor = value.fillColor;
+    const strokeColor = value.strokeColor;
+    const strokeWidth = value.strokeWidth;
+    if (
+      typeof fillColor !== 'string' ||
+      typeof strokeColor !== 'string' ||
+      typeof strokeWidth !== 'number'
+    ) {
+      return undefined;
+    }
+
+    return {
+      fillColor,
+      strokeColor,
+      strokeWidth,
+    };
   }
 
   /**

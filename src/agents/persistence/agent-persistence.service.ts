@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import {
   AGENT_MESSAGE_CONTENT_TYPE,
+  AGENT_MESSAGE_ROLE,
   AGENT_MESSAGE_STATUS,
   AGENT_RUN_STATUS,
 } from '../../common/agents';
@@ -218,6 +219,28 @@ export class AgentPersistenceService {
     conversation.state = input.state;
 
     return this.conversationRepository.save(conversation);
+  }
+
+  /**
+   * 读取会话内最近一条助手消息的 metadata。
+   *
+   * @param conversationId 会话 ID。
+   * @returns 最近助手消息 metadata，不存在时返回 undefined。
+   */
+  async getLatestAssistantMessageMetadata(
+    conversationId: string,
+  ): Promise<Record<string, unknown> | undefined> {
+    const message = await this.messageRepository.findOne({
+      where: {
+        conversationId,
+        role: AGENT_MESSAGE_ROLE.ASSISTANT,
+      },
+      order: {
+        createdAt: 'DESC',
+      },
+    });
+
+    return message?.metadata;
   }
 
   /**

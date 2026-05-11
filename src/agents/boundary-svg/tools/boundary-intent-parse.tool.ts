@@ -71,13 +71,25 @@ function extractExplicitCityCodeFromUserInput(
  * @returns 城市名称，不存在时返回 undefined。
  */
 function extractCityName(message: string): string | undefined {
+  /**
+   * 规范化候选城市名称，去掉指令前缀和助词尾缀。
+   *
+   * @param candidate 原始候选名称。
+   * @returns 规范化后的城市名称。
+   */
+  const normalizeCityNameCandidate = (candidate: string): string =>
+    candidate
+      .replace(/^(?:帮我|给我|请|查询|获取|下载|生成|查看|帮忙|麻烦)+/g, '')
+      .replace(/[的地得]+$/g, '')
+      .trim();
+
   const cityPattern =
     /([\u4e00-\u9fa5]{2,}(?:市|区|县|州|盟|自治州|自治县|特别行政区))/g;
   const invalidCityCandidatePattern =
     /(请|使用|查询|获取|下载|生成|查看|帮我|给我|城市)/;
   const explicitMatches = [...message.matchAll(cityPattern)];
   for (const matched of explicitMatches) {
-    const candidate = matched[1]?.trim();
+    const candidate = normalizeCityNameCandidate(matched[1] ?? '');
     if (!candidate) {
       continue;
     }
@@ -89,7 +101,7 @@ function extractCityName(message: string): string | undefined {
   const fuzzyPattern =
     /(?:给我|查询|获取|下载|生成|查看)\s*([\u4e00-\u9fa5]{2,10})(?:的)?边界/;
   const fuzzyMatch = message.match(fuzzyPattern);
-  const fuzzyCandidate = fuzzyMatch?.[1]?.trim();
+  const fuzzyCandidate = normalizeCityNameCandidate(fuzzyMatch?.[1] ?? '');
   if (!fuzzyCandidate) {
     return undefined;
   }
